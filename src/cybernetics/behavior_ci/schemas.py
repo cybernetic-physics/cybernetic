@@ -213,6 +213,12 @@ class SessionConfig:
     gpu_spec: Optional[str] = None
     idle_timeout_minutes: int = 120
     ready_timeout_seconds: int = 900
+    # Author-at-runtime: spawn this robot, upload this repo module, and call its
+    # setup function to build the scene on a fresh blank session.
+    spawn_robot: Optional[str] = None
+    spawn_position: Optional[List[float]] = None
+    module_path: Optional[str] = None
+    setup_entrypoint: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -279,6 +285,10 @@ class BehaviorCiConfig:
                 gpu_spec=sess.get("gpu_spec"),
                 idle_timeout_minutes=int(sess.get("idle_timeout_minutes", 120)),
                 ready_timeout_seconds=int(sess.get("ready_timeout_seconds", 900)),
+                spawn_robot=sess.get("spawn_robot"),
+                spawn_position=sess.get("spawn_position"),
+                module_path=sess.get("module_path"),
+                setup_entrypoint=sess.get("setup_entrypoint"),
             ),
             evals=eval_paths,
             policy_backends=dict(data.get("policy_backends", {})),

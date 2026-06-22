@@ -50,13 +50,25 @@ def _mcp_handler(camera_present=True):
         body = json.loads(request.content)
         name = body["params"]["name"]
         args = body["params"]["arguments"]
-        if name == "isaac.execute_script":
+        if name == "isaac.create_robot":
+            data = {"status": "success", "prim_path": "/G1", "num_dof": 43}
+        elif name == "isaac.execute_script":
             code = args["code"]
             assert "args" not in args  # real tool has no args param
-            if "CAMERA_OK" in code:  # camera-presence check script
+            if "ISAAC_READY" in code:  # post-spawn readiness probe
+                stdout = "ISAAC_READY\n"
+            elif "MODULE_UPLOADED" in code:  # module upload
+                stdout = "MODULE_UPLOADED\n"
+            elif "BEHAVIOR_CI_SETUP_OK" in code:  # setup_scene call
+                stdout = (
+                    "BEHAVIOR_CI_SETUP_OK:"
+                    + json.dumps({"p18": [0.36, -0.6, 0.47], "p19": [0.25, -0.57, 0.58]})
+                    + "\n"
+                )
+            elif "CAMERA_OK" in code:  # camera-presence check
                 stdout = "CAMERA_OK\n" if camera_present else "CAMERA_MISSING\n"
-            else:  # trial script imports behavior_ci_env and prints the sentinel
-                assert "behavior_ci_env" in code and "sys.path.insert" in code
+            else:  # trial script imports the module and prints the result sentinel
+                assert "sys.path.insert" in code
                 result = {
                     "metrics": {
                         "torch_tip_distance_to_target_cm": 1.3,
@@ -180,3 +192,31 @@ def test_ready_poll_tolerates_transient_502() -> None:
     ) as a:
         a.prepare(_scene())
         assert a.session_id == "sess_test"
+
+
+@respx.mock
+def test_author_at_runtime_prepare_builds_scene() -> None:
+    # Blank session + spawn robot + upload module + setup_scene, then a trial.
+    respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(200, json={"sessionId": "sess_test"})
+    )
+    respx.get(f"{BASE}/v1/sessions/sess_test").mock(
+        return_value=httpx.Response(200, json={"status": "running", "isaac_extension_ready": True})
+    )
+    respx.post(f"{BASE}/v1/sessions/sess_test/stop").mock(return_value=httpx.Response(204))
+    respx.post(f"{BASE}/mcp").mock(side_effect=_mcp_handler(camera_present=True))
+
+    with IsaacSessionAdapter(
+        base_url=BASE,
+        api_key="cp_live_x",
+        session=_cfg(),
+        poll_interval_seconds=0,
+        spawn_robot="g1",
+        module_source="# uploaded behavior_ci_env module",
+        module_name="behavior_ci_env",
+        setup_entrypoint="setup_scene",
+    ) as a:
+        a.prepare(_scene())
+        obs = a.run_trial(_policy(), 0, {})
+        assert obs.metrics["collision_count"] == 0
+        assert obs.trajectory_id == "g1-run00"
