@@ -162,26 +162,29 @@ class BehaviorCiRunner:
                 replay_dir=replay_dir, allow_placeholder_replays=allow_placeholder
             )
 
-        # hosted isaac-session
+        # hosted isaac-session. Only API keys are secrets (env / login store);
+        # URLs, workspace, and env id are non-secret config (config file first,
+        # env var as fallback).
         api_key = resolve_api_key()
         if not api_key:
             raise ConfigError(
                 "isaac-session adapter needs an API key; set CYBERNETICS_API_KEY "
                 "(or CP_API_KEY) or run 'cybernetics auth login'."
             )
-        base_url = resolve_base_url() or os.environ.get(cfg.base_url_env)
+        base_url = cfg.base_url or resolve_base_url() or os.environ.get(cfg.base_url_env)
         if not base_url:
             raise ConfigError(
-                f"isaac-session adapter needs a control-plane base URL; set "
-                f"{cfg.base_url_env} or CYBERNETICS_BASE_URL."
+                "isaac-session adapter needs a control-plane base URL; set "
+                "simulator.base_url in the config or the CYBERNETICS_BASE_URL env var."
             )
+        mcp_url = cfg.mcp_url or os.environ.get(MCP_URL_ENV) or base_url
         return IsaacSessionAdapter(
             base_url=base_url,
             api_key=api_key,
             session=cfg.session,
-            mcp_url=os.environ.get(MCP_URL_ENV, base_url),
+            mcp_url=mcp_url,
             mcp_api_key=os.environ.get(MCP_API_KEY_ENV, api_key),
-            workspace_id=os.environ.get(WORKSPACE_ENV),
+            workspace_id=cfg.workspace_id or os.environ.get(WORKSPACE_ENV),
             keep_session=keep_session,
         )
 
