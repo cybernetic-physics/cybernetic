@@ -229,6 +229,11 @@ class BehaviorCiConfig:
     base_url_env: str
     session: SessionConfig
     evals: Dict[str, str]
+    # Non-secret connection config (checked into the repo, not GitHub secrets).
+    # Only API keys are secrets; URLs/ids are public config.
+    base_url: Optional[str] = None
+    mcp_url: Optional[str] = None
+    workspace_id: Optional[str] = None
     policy_backends: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -264,6 +269,9 @@ class BehaviorCiConfig:
             replay_source_dir=artifacts.get("replay_source_dir"),
             simulator_adapter=adapter,
             base_url_env=sim.get("base_url_env", "CYBERNETICS_BASE_URL"),
+            base_url=sim.get("base_url"),
+            mcp_url=sim.get("mcp_url"),
+            workspace_id=sim.get("workspace_id"),
             session=SessionConfig(
                 scene_env=sess.get("scene_env", ""),
                 camera=sess.get("camera", ""),
