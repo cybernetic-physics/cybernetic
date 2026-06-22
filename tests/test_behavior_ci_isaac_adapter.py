@@ -43,28 +43,37 @@ def _policy():
     )
 
 
-def _mcp_handler(cameras):
+def _mcp_handler(camera_present=True):
+    # Mirrors the real MCP gateway: isaac.execute_script takes code-only and
+    # returns results via stdout (no structured metrics, no emit()).
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         name = body["params"]["name"]
-        if name == "isaac.get_scene_info":
-            data = {"cameras": cameras}
-        elif name == "isaac.execute_script":
-            data = {
-                "metrics": {
-                    "torch_tip_distance_to_target_cm": 1.3,
-                    "collision_count": 0,
-                    "restricted_zone_intrusions": 0,
-                    "max_base_tilt_degrees": 1.4,
-                    "elapsed_seconds": 22.1,
-                },
-                "events": [],
-                "trajectory_id": "t0",
-            }
+        args = body["params"]["arguments"]
+        if name == "isaac.execute_script":
+            code = args["code"]
+            assert "args" not in args  # real tool has no args param
+            if "CAMERA_OK" in code:  # camera-presence check script
+                stdout = "CAMERA_OK\n" if camera_present else "CAMERA_MISSING\n"
+            else:  # trial script imports behavior_ci_env and prints the sentinel
+                assert "behavior_ci_env" in code and "sys.path.insert" in code
+                result = {
+                    "metrics": {
+                        "torch_tip_distance_to_target_cm": 1.3,
+                        "collision_count": 0,
+                        "restricted_zone_intrusions": 0,
+                        "max_base_tilt_degrees": 1.4,
+                        "elapsed_seconds": 2.5,
+                    },
+                    "events": [],
+                    "trajectory_id": "g1-run00",
+                }
+                stdout = "noise\nBEHAVIOR_CI_RESULT:" + json.dumps(result) + "\n"
+            data = {"status": "success", "stdout": stdout, "stderr": ""}
         elif name == "isaac.capture_video":
-            data = {"output_path": body["params"]["arguments"]["output_path"]}
+            data = {"status": "success", "path": args["output_path"], "bytes": len(MP4)}
         elif name == "isaac.download_artifact":
-            data = {"data": base64.b64encode(MP4).decode()}
+            data = {"encoding": "base64", "data": base64.b64encode(MP4).decode()}
         else:
             data = {}
         envelope = {
@@ -108,7 +117,7 @@ def test_full_session_lifecycle() -> None:
         return_value=httpx.Response(200, json={"status": "running", "isaac_extension_ready": True})
     )
     stop = respx.post(f"{BASE}/v1/sessions/sess_test/stop").mock(return_value=httpx.Response(204))
-    respx.post(f"{BASE}/mcp").mock(side_effect=_mcp_handler([CAM]))
+    respx.post(f"{BASE}/mcp").mock(side_effect=_mcp_handler(camera_present=True))
 
     with IsaacSessionAdapter(
         base_url=BASE, api_key="cp_live_x", session=_cfg(), poll_interval_seconds=0
@@ -117,6 +126,7 @@ def test_full_session_lifecycle() -> None:
         assert a.session_id == "sess_test"
         obs = a.run_trial(_policy(), 0, {"obstacle_shift_cm": 5})
         assert obs.metrics["collision_count"] == 0
+        assert obs.trajectory_id == "g1-run00"
         replays = a.capture_replays(_scene(), failed_run=None, passed_run=0)
 
     assert create.called
@@ -135,7 +145,7 @@ def test_missing_camera_raises() -> None:
         return_value=httpx.Response(200, json={"status": "running", "isaac_extension_ready": True})
     )
     respx.post(f"{BASE}/v1/sessions/sess_test/stop").mock(return_value=httpx.Response(204))
-    respx.post(f"{BASE}/mcp").mock(side_effect=_mcp_handler(["/World/Cameras/Other"]))
+    respx.post(f"{BASE}/mcp").mock(side_effect=_mcp_handler(camera_present=False))
 
     with pytest.raises(IsaacSessionError, match="camera"):
         with IsaacSessionAdapter(
