@@ -183,6 +183,18 @@ class BehaviorCiRunner:
             or DEFAULT_BASE_URL
         )
         mcp_url = cfg.mcp_url or os.environ.get(MCP_URL_ENV) or base_url
+
+        # Author-at-runtime: read the repo-provided session module so the adapter can
+        # upload it and build the scene on a fresh blank session.
+        module_source = None
+        module_name = "behavior_ci_env"
+        if cfg.session.module_path:
+            module_file = self._resolve(cfg.session.module_path)
+            if not module_file.exists():
+                raise ConfigError(f"simulator.session.module_path not found: {module_file}")
+            module_source = module_file.read_text()
+            module_name = module_file.stem
+
         return IsaacSessionAdapter(
             base_url=base_url,
             api_key=api_key,
@@ -191,6 +203,11 @@ class BehaviorCiRunner:
             mcp_api_key=os.environ.get(MCP_API_KEY_ENV, api_key),
             workspace_id=cfg.workspace_id or os.environ.get(WORKSPACE_ENV),
             keep_session=keep_session,
+            spawn_robot=cfg.session.spawn_robot,
+            spawn_position=cfg.session.spawn_position,
+            module_source=module_source,
+            module_name=module_name,
+            setup_entrypoint=cfg.session.setup_entrypoint,
         )
 
     def _enforce_provenance(self, replay_source: str) -> None:

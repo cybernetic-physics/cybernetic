@@ -58,6 +58,12 @@ class IsaacSessionAdapter:
         replay_fps: int = 24,
         transient_retries: int = 4,
         transient_backoff: float = 2.0,
+        spawn_robot: Optional[str] = None,
+        spawn_position: Optional[List[float]] = None,
+        module_source: Optional[str] = None,
+        module_name: str = "behavior_ci_env",
+        setup_entrypoint: Optional[str] = None,
+        isaac_ready_timeout: float = 180.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.mcp_url = (mcp_url or base_url).rstrip("/")
@@ -71,13 +77,21 @@ class IsaacSessionAdapter:
         self.replay_fps = replay_fps
         self._max_retries = transient_retries
         self._retry_backoff = transient_backoff
+        # Author-at-runtime: spawn the robot, upload a repo module, and build the
+        # scene on a fresh blank session (no dependency on a pre-published env).
+        self.spawn_robot = spawn_robot
+        self.spawn_position = spawn_position
+        self.module_source = module_source
+        self.module_name = module_name
+        self.setup_entrypoint = setup_entrypoint
+        self.isaac_ready_timeout = isaac_ready_timeout
         self.session_id: Optional[str] = None
         self._rpc_id = 0
         self._owns_client = http_client is None
         if http_client is None:
             import httpx
 
-            http_client = httpx.Client(timeout=60.0)
+            http_client = httpx.Client(timeout=180.0)
         self._client = http_client
 
     # -- context management: guarantee the session is released ------------- #
@@ -115,14 +129,70 @@ class IsaacSessionAdapter:
 
         self._await_ready(self.cfg.ready_timeout_seconds)
 
-        # isaac.get_scene_info returns a pong/assets blob with no prim list, so
-        # verify the pass/fail camera by querying the stage directly.
+        # Author-at-runtime: spawn the robot, upload the repo module, build + calibrate
+        # the scene — so a fresh blank session is fully set up from the repo, with no
+        # dependency on a pre-published environment snapshot.
+        if self.spawn_robot:
+            self._mcp(
+                "isaac.create_robot",
+                {"robot_type": self.spawn_robot, "position": self.spawn_position or [0, -0.55, 0]},
+            )
+            self._await_isaac_ready()  # asset load briefly knocks the extension offline
+
+        if self.module_source:
+            self._upload_module()
+
+        if self.setup_entrypoint:
+            setup_args = {
+                "camera": scene.camera,
+                "scene_env": scene.scene_env,
+                "robot": scene.robot,
+            }
+            out = self._mcp(
+                "isaac.execute_script",
+                {"code": _setup_script(self.module_name, self.setup_entrypoint, setup_args)},
+            )
+            if "BEHAVIOR_CI_SETUP_OK" not in (out.get("stdout") or ""):
+                raise IsaacSessionError(
+                    f"scene setup ({self.module_name}.{self.setup_entrypoint}) did not complete: "
+                    f"{(out.get('stdout') or '')[-300:]!r} {(out.get('stderr') or '')[-300:]!r}"
+                )
+
+        # Verify the pass/fail camera exists (get_scene_info has no prim list).
         out = self._mcp("isaac.execute_script", {"code": _camera_check_script(scene.camera)})
         if "CAMERA_OK" not in (out.get("stdout") or ""):
             raise IsaacSessionError(
-                f"required pass/fail camera '{scene.camera}' not found in the loaded "
-                f"environment '{env_id or scene.scene_env}'"
+                f"required pass/fail camera '{scene.camera}' not present after setup "
+                f"(env '{env_id or scene.scene_env}')"
             )
+
+    def _await_isaac_ready(self) -> None:
+        """Poll a trivial script until the Isaac extension responds (post asset-load)."""
+        deadline = time.monotonic() + self.isaac_ready_timeout
+        while True:
+            try:
+                out = self._mcp("isaac.execute_script", {"code": "print('ISAAC_READY')"})
+                if "ISAAC_READY" in (out.get("stdout") or ""):
+                    return
+            except IsaacSessionError:
+                pass
+            if time.monotonic() >= deadline:
+                raise IsaacSessionError("Isaac extension did not come back ready after robot spawn")
+            time.sleep(self.poll_interval_seconds)
+
+    def _upload_module(self) -> None:
+        import base64
+
+        blob = base64.b64encode(self.module_source.encode()).decode()
+        code = (
+            "import base64, pathlib\n"
+            f"pathlib.Path('/data/workspace/{self.module_name}.py')"
+            f".write_text(base64.b64decode('{blob}').decode())\n"
+            "print('MODULE_UPLOADED')\n"
+        )
+        out = self._mcp("isaac.execute_script", {"code": code})
+        if "MODULE_UPLOADED" not in (out.get("stdout") or ""):
+            raise IsaacSessionError(f"failed to upload session module {self.module_name}")
 
     def _await_ready(self, timeout_seconds: float) -> None:
         # Cold boot can take minutes and the gateway may blip (502/503) mid-poll;
@@ -183,7 +253,10 @@ class IsaacSessionAdapter:
         # isaac.execute_script takes code only (no args) and returns results via
         # stdout, so the entrypoint args are inlined into the script and the result
         # is printed under a sentinel we parse back out.
-        out = self._mcp("isaac.execute_script", {"code": _trial_script(entrypoint, payload)})
+        out = self._mcp(
+            "isaac.execute_script",
+            {"code": _trial_script(self.module_name, entrypoint, payload)},
+        )
         result = _parse_result(out)
         metrics = result.get("metrics")
         if not isinstance(metrics, dict):
@@ -343,21 +416,28 @@ def _camera_check_script(camera: str) -> str:
     )
 
 
-def _trial_script(entrypoint: str, args: Dict[str, Any]) -> str:
-    """Session-side invocation. The published behavior-ci environment provides
-    ``behavior_ci_env.{entrypoint}(args) -> {"metrics": {...}, "events": [...]}``.
-
-    isaac.execute_script has no ``args`` parameter and no ``emit()``, and
-    ``/data/workspace`` is not on ``sys.path`` by default — so we inline the args
-    (base64 to avoid quoting), add the workspace to the path, and print the result
-    under a sentinel the adapter parses from stdout.
-    """
+def _module_call(module_name: str, entrypoint: str, args: Dict[str, Any]) -> str:
+    """Common preamble: put the workspace on sys.path, import the uploaded module,
+    decode inlined args (isaac.execute_script has no args param), call entrypoint."""
     blob = base64.b64encode(json.dumps(args).encode()).decode()
     return (
         "import sys, json, base64\n"
         "sys.path.insert(0, '/data/workspace')\n"
-        "import behavior_ci_env\n"
+        f"import {module_name} as _m\n"
         f"_args = json.loads(base64.b64decode('{blob}').decode())\n"
-        f"_res = behavior_ci_env.{entrypoint}(_args)\n"
+        f"_res = _m.{entrypoint}(_args)\n"
+    )
+
+
+def _trial_script(module_name: str, entrypoint: str, args: Dict[str, Any]) -> str:
+    """Run a trial and print the JSON result under a sentinel parsed from stdout."""
+    return _module_call(module_name, entrypoint, args) + (
         f"print({_RESULT_SENTINEL!r} + json.dumps(_res))\n"
+    )
+
+
+def _setup_script(module_name: str, entrypoint: str, args: Dict[str, Any]) -> str:
+    """Build + calibrate the scene; print a completion sentinel."""
+    return _module_call(module_name, entrypoint, args) + (
+        "print('BEHAVIOR_CI_SETUP_OK:' + json.dumps(_res))\n"
     )
