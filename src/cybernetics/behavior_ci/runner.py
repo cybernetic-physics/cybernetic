@@ -35,6 +35,9 @@ MCP_URL_ENV = "CYBERNETICS_MCP_URL"
 MCP_API_KEY_ENV = "CYBERNETICS_MCP_API_KEY"
 WORKSPACE_ENV = "CYBERNETICS_WORKSPACE_ID"
 ENV_ID_ENV = "BEHAVIOR_CI_ENV_ID"
+# Hosted production control plane; the MCP gateway is served on the same host at
+# /mcp. Used as the final fallback so the hosted adapter needs only an API key.
+DEFAULT_BASE_URL = "https://api.cyberneticphysics.com"
 
 
 class BehaviorCiRunner:
@@ -171,12 +174,14 @@ class BehaviorCiRunner:
                 "isaac-session adapter needs an API key; set CYBERNETICS_API_KEY "
                 "(or CP_API_KEY) or run 'cybernetics auth login'."
             )
-        base_url = cfg.base_url or resolve_base_url() or os.environ.get(cfg.base_url_env)
-        if not base_url:
-            raise ConfigError(
-                "isaac-session adapter needs a control-plane base URL; set "
-                "simulator.base_url in the config or the CYBERNETICS_BASE_URL env var."
-            )
+        # Defaults to hosted production; override via config (simulator.base_url)
+        # or the CYBERNETICS_BASE_URL env var for a dev/staging stack.
+        base_url = (
+            cfg.base_url
+            or resolve_base_url()
+            or os.environ.get(cfg.base_url_env)
+            or DEFAULT_BASE_URL
+        )
         mcp_url = cfg.mcp_url or os.environ.get(MCP_URL_ENV) or base_url
         return IsaacSessionAdapter(
             base_url=base_url,
