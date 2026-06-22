@@ -49,7 +49,9 @@ Documentation = "https://github.com/cybernetic-physics/cybernetic#readme"
 tokenizers = ["transformers"]
 aiohttp = ["aiohttp", "httpx_aiohttp>=0.1.8"]
 torch = ["torch"]
-all = ["cybernetic-physics[tokenizers,aiohttp,torch]"]
+# behavior-ci reads YAML config/eval files; PyYAML stays out of the core diet.
+behavior-ci = ["pyyaml>=6"]
+all = ["cybernetic-physics[tokenizers,aiohttp,torch,behavior-ci]"]
 
 [tool.uv]
 managed = true
@@ -61,6 +63,7 @@ dev = [
   "pytest-asyncio",
   "respx",
   "ruff",
+  "pyyaml>=6",
   # Build backend for the hermetic packaging-boundary test (build --no-isolation).
   "build",
   "hatchling==1.26.3",
