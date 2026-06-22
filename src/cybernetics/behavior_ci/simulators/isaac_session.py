@@ -30,6 +30,8 @@ from .base import ReplayResult, SceneSpec, looks_like_mp4
 _MEDIA_DIR = "/data/workspace/media"
 _REPLAY_MAX_BYTES = 25 * 1024 * 1024
 _TERMINAL_BAD = {"failed", "terminated", "stopped", "error", "snapshot_failed"}
+# Transient HTTP statuses to retry/tolerate (gateway blips during cold boot).
+_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
 
 class IsaacSessionError(Exception):
@@ -54,6 +56,8 @@ class IsaacSessionAdapter:
         http_client: Any = None,
         replay_duration_seconds: float = 6.0,
         replay_fps: int = 24,
+        transient_retries: int = 4,
+        transient_backoff: float = 2.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.mcp_url = (mcp_url or base_url).rstrip("/")
@@ -65,6 +69,8 @@ class IsaacSessionAdapter:
         self.poll_interval_seconds = poll_interval_seconds
         self.replay_duration_seconds = replay_duration_seconds
         self.replay_fps = replay_fps
+        self._max_retries = transient_retries
+        self._retry_backoff = transient_backoff
         self.session_id: Optional[str] = None
         self._rpc_id = 0
         self._owns_client = http_client is None
@@ -119,18 +125,38 @@ class IsaacSessionAdapter:
             )
 
     def _await_ready(self, timeout_seconds: float) -> None:
+        # Cold boot can take minutes and the gateway may blip (502/503) mid-poll;
+        # only auth failures and terminal session states are fatal here. Everything
+        # else (transient HTTP, connection errors, not-ready-yet) keeps polling
+        # until the deadline.
         deadline = time.monotonic() + timeout_seconds
+        last = "no response yet"
         while True:
-            info = self._cp("GET", f"/v1/sessions/{self.session_id}")
-            status = str(info.get("status", "")).lower()
-            if status in _TERMINAL_BAD:
-                raise IsaacSessionError(f"session entered terminal state '{status}'")
-            if status in {"running", "idle"} and _bridge_ready(info):
-                return
+            try:
+                resp = self._send(
+                    "GET",
+                    f"{self.base_url}/v1/sessions/{self.session_id}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+            except IsaacSessionError as exc:
+                last = str(exc)  # connection error after retries — keep polling
+                resp = None
+            if resp is not None:
+                if resp.status_code in (401, 403):
+                    raise IsaacSessionError(f"auth failed polling session ({resp.status_code})")
+                if resp.status_code < 400 and resp.content:
+                    info = resp.json()
+                    status = str(info.get("status", "")).lower()
+                    if status in _TERMINAL_BAD:
+                        raise IsaacSessionError(f"session entered terminal state '{status}'")
+                    if status in {"running", "idle"} and _bridge_ready(info):
+                        return
+                    last = f"status={status or 'unknown'}, bridge not ready"
+                else:
+                    last = f"HTTP {resp.status_code}"  # transient; keep polling
             if time.monotonic() >= deadline:
                 raise IsaacSessionError(
-                    f"session {self.session_id} not ready after {timeout_seconds}s "
-                    f"(last status '{status}')"
+                    f"session {self.session_id} not ready after {timeout_seconds}s ({last})"
                 )
             time.sleep(self.poll_interval_seconds)
 
@@ -220,10 +246,28 @@ class IsaacSessionAdapter:
 
     # -- transport --------------------------------------------------------- #
 
+    def _send(self, method: str, url: str, **kwargs: Any):
+        """HTTP with transient retry (5xx/429 + connection errors, capped backoff)."""
+        import httpx
+
+        for attempt in range(self._max_retries + 1):
+            try:
+                resp = self._client.request(method, url, **kwargs)
+            except httpx.HTTPError as exc:
+                if attempt >= self._max_retries:
+                    raise IsaacSessionError(f"{method} {url}: connection error: {exc}") from exc
+                time.sleep(min(self._retry_backoff * (2**attempt), 15.0))
+                continue
+            if resp.status_code in _TRANSIENT_STATUS and attempt < self._max_retries:
+                time.sleep(min(self._retry_backoff * (2**attempt), 15.0))
+                continue
+            return resp
+        raise IsaacSessionError(f"{method} {url}: exhausted transient retries")  # pragma: no cover
+
     def _cp(
         self, method: str, path: str, json_body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        resp = self._client.request(
+        resp = self._send(
             method,
             f"{self.base_url}{path}",
             json=json_body,
@@ -237,7 +281,8 @@ class IsaacSessionAdapter:
 
     def _mcp(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         self._rpc_id += 1
-        resp = self._client.post(
+        resp = self._send(
+            "POST",
             f"{self.mcp_url}/mcp",
             json={
                 "jsonrpc": "2.0",

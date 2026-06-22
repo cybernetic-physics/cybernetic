@@ -152,3 +152,31 @@ def test_missing_camera_raises() -> None:
             base_url=BASE, api_key="cp_live_x", session=_cfg(), poll_interval_seconds=0
         ) as a:
             a.prepare(_scene())
+
+
+@respx.mock
+def test_ready_poll_tolerates_transient_502() -> None:
+    # Cold-boot gateway blips must not kill the run (regression: a single 502 on
+    # the readiness GET previously raised and failed the whole CI job).
+    respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(200, json={"sessionId": "sess_test"})
+    )
+    respx.get(f"{BASE}/v1/sessions/sess_test").mock(
+        side_effect=[
+            httpx.Response(502),
+            httpx.Response(503),
+            httpx.Response(200, json={"status": "running", "isaac_extension_ready": True}),
+        ]
+    )
+    respx.post(f"{BASE}/v1/sessions/sess_test/stop").mock(return_value=httpx.Response(204))
+    respx.post(f"{BASE}/mcp").mock(side_effect=_mcp_handler(camera_present=True))
+
+    with IsaacSessionAdapter(
+        base_url=BASE,
+        api_key="cp_live_x",
+        session=_cfg(),
+        poll_interval_seconds=0,
+        transient_backoff=0,
+    ) as a:
+        a.prepare(_scene())
+        assert a.session_id == "sess_test"
