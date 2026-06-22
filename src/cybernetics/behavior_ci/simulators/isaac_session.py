@@ -109,8 +109,10 @@ class IsaacSessionAdapter:
 
         self._await_ready(self.cfg.ready_timeout_seconds)
 
-        scene_info = self._mcp("isaac.get_scene_info", {})
-        if not _camera_present(scene_info, scene.camera):
+        # isaac.get_scene_info returns a pong/assets blob with no prim list, so
+        # verify the pass/fail camera by querying the stage directly.
+        out = self._mcp("isaac.execute_script", {"code": _camera_check_script(scene.camera)})
+        if "CAMERA_OK" not in (out.get("stdout") or ""):
             raise IsaacSessionError(
                 f"required pass/fail camera '{scene.camera}' not found in the loaded "
                 f"environment '{env_id or scene.scene_env}'"
@@ -152,13 +154,14 @@ class IsaacSessionAdapter:
             "scenario": scenario,
             "camera": self.cfg.camera,
         }
-        data = self._mcp(
-            "isaac.execute_script",
-            {"code": _trial_script(entrypoint), "args": payload},
-        )
-        metrics = data.get("metrics")
+        # isaac.execute_script takes code only (no args) and returns results via
+        # stdout, so the entrypoint args are inlined into the script and the result
+        # is printed under a sentinel we parse back out.
+        out = self._mcp("isaac.execute_script", {"code": _trial_script(entrypoint, payload)})
+        result = _parse_result(out)
+        metrics = result.get("metrics")
         if not isinstance(metrics, dict):
-            raise IsaacSessionError(f"trial {run}: controller returned no metrics: {data}")
+            raise IsaacSessionError(f"trial {run}: controller returned no metrics: {result}")
         events = [
             Event(
                 run=run,
@@ -166,13 +169,13 @@ class IsaacSessionAdapter:
                 code=str(e.get("code", "EVENT")),
                 message=str(e.get("message", "")),
             )
-            for e in data.get("events", [])
+            for e in result.get("events", [])
         ]
         return TrialObservation(
             run=run,
             metrics={k: v for k, v in metrics.items()},
             events=events,
-            trajectory_id=str(data.get("trajectory_id", f"{policy.policy_id}-run{run:02d}")),
+            trajectory_id=str(result.get("trajectory_id", f"{policy.policy_id}-run{run:02d}")),
         )
 
     def capture_replays(
@@ -270,20 +273,46 @@ def _bridge_ready(info: Dict[str, Any]) -> bool:
     return bool(isinstance(bridge, dict) and bridge.get("isaac_extension_ready"))
 
 
-def _camera_present(scene_info: Dict[str, Any], camera: str) -> bool:
-    # The scene-info payload shape varies; accept any place the prim path shows up.
-    prims = scene_info.get("cameras") or scene_info.get("prims") or scene_info.get("camera_prims")
-    if isinstance(prims, list):
-        return any(camera == (p if isinstance(p, str) else p.get("path")) for p in prims)
-    return camera in json.dumps(scene_info)
+_RESULT_SENTINEL = "BEHAVIOR_CI_RESULT:"
 
 
-def _trial_script(entrypoint: str) -> str:
-    """Session-side invocation. The published behavior-ci environment defines
-    ``entrypoint(args)`` and returns ``{"metrics": {...}, "events": [...]}``."""
+def _parse_result(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the entrypoint's JSON result out of the execute_script stdout."""
+    stdout = (data.get("stdout") or "") if isinstance(data, dict) else ""
+    for line in stdout.splitlines():
+        if line.startswith(_RESULT_SENTINEL):
+            return json.loads(line[len(_RESULT_SENTINEL) :])
+    stderr = (data.get("stderr") or "") if isinstance(data, dict) else ""
+    raise IsaacSessionError(
+        f"no {_RESULT_SENTINEL} line in session output; "
+        f"stdout={stdout[-400:]!r} stderr={stderr[-400:]!r}"
+    )
 
+
+def _camera_check_script(camera: str) -> str:
+    """Print CAMERA_OK iff the pass/fail camera prim exists on the stage."""
     return (
-        "import json, behavior_ci_env\n"
-        f"result = behavior_ci_env.{entrypoint}(args)\n"
-        "emit(json.dumps(result))\n"
+        "import omni.usd\n"
+        f"_p = omni.usd.get_context().get_stage().GetPrimAtPath({camera!r})\n"
+        "print('CAMERA_OK' if _p.IsValid() else 'CAMERA_MISSING')\n"
+    )
+
+
+def _trial_script(entrypoint: str, args: Dict[str, Any]) -> str:
+    """Session-side invocation. The published behavior-ci environment provides
+    ``behavior_ci_env.{entrypoint}(args) -> {"metrics": {...}, "events": [...]}``.
+
+    isaac.execute_script has no ``args`` parameter and no ``emit()``, and
+    ``/data/workspace`` is not on ``sys.path`` by default — so we inline the args
+    (base64 to avoid quoting), add the workspace to the path, and print the result
+    under a sentinel the adapter parses from stdout.
+    """
+    blob = base64.b64encode(json.dumps(args).encode()).decode()
+    return (
+        "import sys, json, base64\n"
+        "sys.path.insert(0, '/data/workspace')\n"
+        "import behavior_ci_env\n"
+        f"_args = json.loads(base64.b64decode('{blob}').decode())\n"
+        f"_res = behavior_ci_env.{entrypoint}(_args)\n"
+        f"print({_RESULT_SENTINEL!r} + json.dumps(_res))\n"
     )
