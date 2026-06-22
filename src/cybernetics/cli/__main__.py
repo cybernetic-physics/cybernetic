@@ -20,6 +20,7 @@ from .lazy_group import LazyGroup
     cls=LazyGroup,
     lazy_subcommands={
         "auth": "cybernetics.cli.commands.auth:cli",
+        "behavior-ci": "cybernetics.cli.commands.behavior_ci:cli",
         "checkpoint": "cybernetics.cli.commands.checkpoint:cli",
         "doctor": "cybernetics.cli.commands.doctor:cli",
         "run": "cybernetics.cli.commands.run:cli",

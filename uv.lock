@@ -318,8 +318,12 @@ aiohttp = [
 all = [
     { name = "aiohttp" },
     { name = "httpx-aiohttp" },
+    { name = "pyyaml" },
     { name = "torch" },
     { name = "transformers" },
+]
+behavior-ci = [
+    { name = "pyyaml" },
 ]
 tokenizers = [
     { name = "transformers" },
@@ -335,6 +339,7 @@ dev = [
     { name = "hatchling" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml" },
     { name = "respx" },
     { name = "ruff" },
 ]
@@ -344,19 +349,20 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'aiohttp'" },
     { name = "anyio", specifier = ">=3.5.0,<5" },
     { name = "click", specifier = ">=8.0.0" },
-    { name = "cybernetic-physics", extras = ["tokenizers", "aiohttp", "torch"], marker = "extra == 'all'" },
+    { name = "cybernetic-physics", extras = ["tokenizers", "aiohttp", "torch", "behavior-ci"], marker = "extra == 'all'" },
     { name = "distro", specifier = ">=1.7.0,<2" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.23.0,<1" },
     { name = "httpx-aiohttp", marker = "extra == 'aiohttp'", specifier = ">=0.1.8" },
     { name = "numpy" },
     { name = "pydantic", specifier = ">=1.9.0,<3" },
+    { name = "pyyaml", marker = "extra == 'behavior-ci'", specifier = ">=6" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "sniffio" },
     { name = "torch", marker = "extra == 'torch'" },
     { name = "transformers", marker = "extra == 'tokenizers'" },
     { name = "typing-extensions", specifier = ">=4.10,<5" },
 ]
-provides-extras = ["tokenizers", "aiohttp", "torch", "all"]
+provides-extras = ["tokenizers", "aiohttp", "torch", "behavior-ci", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -365,6 +371,7 @@ dev = [
     { name = "hatchling", specifier = "==1.26.3" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "respx" },
     { name = "ruff" },
 ]
