@@ -1,0 +1,118 @@
+name: Publish Python SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Package index to publish to"
+        required: true
+        default: testpypi
+        type: choice
+        options:
+          - testpypi
+          - pypi
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Run packaging boundary test
+        run: uv run pytest tests/test_packaging_boundary.py -q
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: cybernetic-physics-dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: pypi-test
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: cybernetic-physics-dist
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Smoke install from TestPyPI
+        run: |
+          version="$(python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              print(tomllib.load(fh)["project"]["version"])
+          PY
+          )"
+          python -m venv /tmp/cybernetic-sdk-smoke
+          . /tmp/cybernetic-sdk-smoke/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "cybernetic-physics==${version}"
+          python - <<'PY'
+          import cybernetics
+          print(cybernetics.__version__)
+          PY
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: cybernetic-physics-dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,635 @@
+"""SamplingClient for Cybernetics API."""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import logging
+import os
+import time
+import uuid
+from concurrent.futures import Future as ConcurrentFuture
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+
+import cybernetics
+from cybernetics import types
+from cybernetics.lib.client_connection_pool_type import ClientConnectionPoolType
+from cybernetics.lib.public_interfaces.api_future import APIFuture, AwaitableConcurrentFuture
+from cybernetics.lib.sidecar import SidecarHandle, SidecarRPC, create_sidecar_handle
+from cybernetics.lib.telemetry import Telemetry, capture_exceptions
+from cybernetics.lib.telemetry_provider import TelemetryProvider
+
+from ..api_future_impl import QueueState, QueueStateObserver, _APIFuture
+from ..retry_handler import RetryConfig, RetryHandler
+
+if TYPE_CHECKING:
+    from transformers.tokenization_utils import PreTrainedTokenizer
+
+    from ..internal_client_holder import InternalClientHolder
+
+# pyright: reportPrivateImportUsage=false
+
+logger = logging.getLogger(__name__)
+
+U = TypeVar("U")
+
+
+# ---------------------------------------------------------------------------
+# Pickle serialization state
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _SamplingClientPickleState:
+    """Serialized state for pickling SamplingClient across processes."""
+
+    session_id: str
+    sampling_session_id: str
+    constructor_kwargs: dict[str, Any]
+    subprocess_sampling: bool
+
+
+# ---------------------------------------------------------------------------
+# Typed RPCs for subprocess-isolated sampling
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _SampleRPC(SidecarRPC):
+    """Typed RPC for SamplingClient.sample()."""
+
+    prompt: types.ModelInput
+    num_samples: int
+    sampling_params: types.SamplingParams
+    include_prompt_logprobs: bool
+    topk_prompt_logprobs: int
+
+    async def execute(self, target: Any) -> Any:
+        return target.sample(
+            prompt=self.prompt,
+            num_samples=self.num_samples,
+            sampling_params=self.sampling_params,
+            include_prompt_logprobs=self.include_prompt_logprobs,
+            topk_prompt_logprobs=self.topk_prompt_logprobs,
+        )
+
+
+@dataclasses.dataclass
+class _ComputeLogprobsRPC(SidecarRPC):
+    """Typed RPC for SamplingClient.compute_logprobs()."""
+
+    prompt: types.ModelInput
+
+    async def execute(self, target: Any) -> Any:
+        return target.compute_logprobs(prompt=self.prompt)
+
+
+class SamplingClient(TelemetryProvider, QueueStateObserver):
+    """Client for text generation and inference from trained or base models.
+
+    The SamplingClient lets you generate text tokens from either a base model or from weights
+    you've saved using a TrainingClient. You typically get one by calling
+    `service_client.create_sampling_client()` or `training_client.save_weights_and_get_sampling_client()`.
+
+    Key methods:
+    - sample() - generate text completions with customizable parameters
+    - compute_logprobs() - get log probabilities for prompt tokens
+
+    Create method parameters:
+    - `model_path`: Path to saved model weights (starts with 'worldlines://')
+    - `base_model`: Name of base model to use for inference (e.g., 'Qwen/Qwen3-8B')
+    - `retry_config`: Configuration for retrying failed requests
+
+    Example:
+    ```python
+    sampling_client = service_client.create_sampling_client(base_model="Qwen/Qwen3-8B")
+    prompt = types.ModelInput.from_ints(tokenizer.encode("The weather today is"))
+    params = types.SamplingParams(max_tokens=20, temperature=0.7)
+    future = sampling_client.sample(prompt=prompt, sampling_params=params, num_samples=1)
+    result = future.result()
+    ```
+
+    Multi-processing support:
+    This class is picklable, so it can be passed to a separate process/worker to sample. It is also
+    safe to pass the same instance of SamplingClient to multiple processes/workers.
+
+    If you are using Cybernetics SDK with more than one process you should always create SamplingClient from
+    the main process and then pass it to the other processes/workers.
+    ServiceClient and TrainingClient should always be managed from the main process.
+
+    Subprocess isolation:
+    Set ``CYBERNETICS_SUBPROCESS_SAMPLING=1`` to run sample() and compute_logprobs() in a dedicated
+    subprocess, preventing GIL contention from CPU-heavy user code (grading, environment
+    interactions) from stalling networking IO and heartbeats. This is transparent — the same
+    API works with or without it.
+    """
+
+    def __init__(
+        self,
+        holder: InternalClientHolder,
+        *,
+        sampling_session_id: str,
+        shadow: bool = False,
+        retry_config: RetryConfig | None = None,
+        subprocess_sampling: bool | None = None,
+    ):
+        self.holder = holder
+
+        # Create retry handler with the provided configuration
+        self.retry_handler = _get_retry_handler(
+            sampling_session_id, retry_config=retry_config, telemetry=holder.get_telemetry()
+        )
+
+        self.feature_gates = set(
+            os.environ.get("CYBERNETICS_FEATURE_GATES", "async_sampling").split(",")
+        )
+
+        self._last_queue_state_logged: float = 0
+
+        self._sampling_session_id: str = sampling_session_id
+
+        self._request_id_counter: int = 0
+        if shadow:
+            # Start request_id_counter at a random high value to avoid collisions
+            # with the original client or other unpickled copies
+            # We use 1B as the base and mod for uuid because the maximum int value is 2^63-1 and 1B*1B is less than 2^63-1.
+            self._request_id_counter = 1_000_000_000 * (int(uuid.uuid4()) % 1_000_000_000 + 1)
+
+        # Subprocess isolation: read env var if not explicitly set
+        if subprocess_sampling is None:
+            subprocess_sampling = os.environ.get("CYBERNETICS_SUBPROCESS_SAMPLING", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+        self._sampling_client_sidecar_handle: SidecarHandle | None = None
+        if subprocess_sampling:
+            from cybernetics.lib.sidecar import _inside_sidecar
+
+            if not _inside_sidecar:
+                self._sampling_client_sidecar_handle = create_sidecar_handle(self)
+
+    @staticmethod
+    async def _create_impl(
+        holder: InternalClientHolder,
+        *,
+        model_path: str | None,
+        base_model: str | None,
+        sampling_session_id: str | None,
+        retry_config: RetryConfig | None,
+    ) -> SamplingClient:
+        if model_path is not None:
+            # When sampling from a checkpoint path, the backend infers the base model
+            # from that checkpoint; forwarding a second base-model hint only widens
+            # the input contract and can become stale or conflicting.
+            base_model = None
+        if sampling_session_id is None:
+            sampling_session_id = await holder._create_sampling_session(
+                model_path=model_path, base_model=base_model
+            )
+        return SamplingClient(
+            holder, sampling_session_id=sampling_session_id, retry_config=retry_config
+        )
+
+    @staticmethod
+    def create(
+        holder: InternalClientHolder,
+        *,
+        model_path: str | None = None,
+        base_model: str | None = None,
+        sampling_session_id: str | None = None,
+        retry_config: RetryConfig | None = None,
+    ) -> APIFuture[SamplingClient]:
+        return holder.run_coroutine_threadsafe(
+            SamplingClient._create_impl(
+                holder,
+                model_path=model_path,
+                base_model=base_model,
+                sampling_session_id=sampling_session_id,
+                retry_config=retry_config,
+            )
+        )
+
+    def _queue_state_from_submit_error(
+        self, error: cybernetics.APIStatusError
+    ) -> tuple[QueueState, str | None] | None:
+        body = getattr(error, "body", None)
+        if not isinstance(body, dict):
+            return None
+        queue_state_str = body.get("queue_state")
+        queue_state_reason = body.get("queue_state_reason")
+        if queue_state_str == "active":
+            return (
+                QueueState.ACTIVE,
+                str(queue_state_reason) if queue_state_reason is not None else None,
+            )
+        if queue_state_str == "paused_rate_limit":
+            return (
+                QueueState.PAUSED_RATE_LIMIT,
+                str(queue_state_reason) if queue_state_reason is not None else None,
+            )
+        if queue_state_str == "paused_capacity":
+            return (
+                QueueState.PAUSED_CAPACITY,
+                str(queue_state_reason) if queue_state_reason is not None else None,
+            )
+        return None
+
+    async def _send_asample_request(
+        self,
+        num_samples: int,
+        prompt: types.ModelInput,
+        sampling_params: types.SamplingParams,
+        include_prompt_logprobs: bool,
+        topk_prompt_logprobs: int,
+        *,
+        request_kind: Literal["sample", "compute_logprobs"] = "sample",
+    ):
+        try:
+            request_id = self._request_id_counter
+            self._request_id_counter += 1
+            request = types.SampleRequest(
+                sampling_session_id=self._sampling_session_id,
+                seq_id=request_id,
+                num_samples=num_samples,
+                prompt=prompt,
+                sampling_params=sampling_params,
+                prompt_logprobs=include_prompt_logprobs,
+                topk_prompt_logprobs=topk_prompt_logprobs,
+                completion_logprobs=bool(getattr(sampling_params, "completion_logprobs", False)),
+            )
+            extra_headers = await self.holder.sample_request_extra_headers(
+                request_kind=request_kind
+            )
+            if request_kind == "compute_logprobs":
+                extra_headers["X-Cybernetics-Request-Class"] = "compute_logprobs"
+            with self.holder.aclient(ClientConnectionPoolType.SAMPLE) as client:
+                return await client.sampling.asample(
+                    request=request,
+                    max_retries=0,
+                    extra_headers=extra_headers,
+                )
+        except cybernetics.APIStatusError as e:
+            if e.status_code == 429:
+                queue_state = self._queue_state_from_submit_error(e)
+                if queue_state is not None:
+                    self.on_queue_state_change(*queue_state)
+                return None
+            raise e
+
+    async def _sample_async_impl(
+        self,
+        prompt: types.ModelInput,
+        num_samples: int,
+        sampling_params: types.SamplingParams,
+        include_prompt_logprobs: bool,
+        topk_prompt_logprobs: int = 0,
+        *,
+        request_kind: Literal["sample", "compute_logprobs"] = "sample",
+    ) -> types.SampleResponse:
+        estimated_bytes_count = self.holder.estimate_bytes_count_in_model_input(prompt)
+        async with self.holder.sample_request_rate_limit(
+            estimated_bytes_count, request_kind=request_kind
+        ):
+            while True:
+                if (
+                    self.holder._sample_backoff_until is not None
+                    and time.monotonic() < self.holder._sample_backoff_until
+                ):
+                    await asyncio.sleep(self.holder.sample_backoff_sleep_seconds())
+                    continue
+
+                untyped_future = await self.holder.execute_with_retries(
+                    self._send_asample_request,
+                    num_samples,
+                    prompt,
+                    sampling_params,
+                    include_prompt_logprobs,
+                    topk_prompt_logprobs,
+                    request_kind=request_kind,
+                )
+                if untyped_future is not None:
+                    break
+                # Handle backoff
+                backoff_duration = 1 if estimated_bytes_count <= 128 * 1024 else 5
+                requested_until = time.monotonic() + backoff_duration
+                if (
+                    self.holder._sample_backoff_until is None
+                    or self.holder._sample_backoff_until < requested_until
+                ):
+                    self.holder._sample_backoff_until = requested_until
+                continue
+
+            future_timeout = getattr(
+                getattr(self.retry_handler, "config", None), "progress_timeout", None
+            )
+            api_future = _APIFuture(
+                types.SampleResponse,
+                self.holder,
+                untyped_future,
+                request_start_time=time.time(),
+                request_type="Sample",
+                queue_state_observer=self,
+            )
+            if future_timeout is None:
+                return await api_future.result_async()
+            try:
+                return await api_future.result_async(timeout=future_timeout)
+            except TypeError:
+                return await api_future.result_async()
+
+    @capture_exceptions(fatal=True)
+    def sample(
+        self,
+        prompt: types.ModelInput,
+        num_samples: int,
+        sampling_params: types.SamplingParams,
+        include_prompt_logprobs: bool = False,
+        topk_prompt_logprobs: int = 0,
+    ) -> ConcurrentFuture[types.SampleResponse]:
+        """Generate text completions from the model.
+
+        Args:
+        - `prompt`: The input tokens as ModelInput
+        - `num_samples`: Number of independent samples to generate
+        - `sampling_params`: Parameters controlling generation (temperature, max_tokens, etc.)
+        - `include_prompt_logprobs`: Whether to include log probabilities for prompt tokens
+        - `topk_prompt_logprobs`: Number of top token log probabilities to return per position
+
+        Returns:
+        - A `Future` containing the `SampleResponse` with generated text
+
+        Example:
+        ```python
+        prompt = types.ModelInput.from_ints(tokenizer.encode("The weather today is"))
+        params = types.SamplingParams(max_tokens=20, temperature=0.7)
+        future = sampling_client.sample(prompt=prompt, sampling_params=params, num_samples=1)
+        result = future.result()
+        for sample in result.samples:
+            print(tokenizer.decode(sample.tokens))
+        ```
+        """
+        if self._sampling_client_sidecar_handle is not None:
+            return self._sampling_client_sidecar_handle.submit_rpc(
+                _SampleRPC(
+                    prompt=prompt,
+                    num_samples=num_samples,
+                    sampling_params=sampling_params,
+                    include_prompt_logprobs=include_prompt_logprobs,
+                    topk_prompt_logprobs=topk_prompt_logprobs,
+                )
+            )
+
+        async def _sample_async():
+            return await self._sample_async_impl(
+                prompt,
+                num_samples,
+                sampling_params,
+                include_prompt_logprobs,
+                topk_prompt_logprobs,
+            )
+
+        @capture_exceptions(fatal=True)
+        async def _sample_async_with_retries() -> types.SampleResponse:
+            return await self.retry_handler.execute(_sample_async)
+
+        # TODO make max_tokens a required field
+        return self.holder.run_coroutine_threadsafe(_sample_async_with_retries()).future()
+
+    async def sample_async(
+        self,
+        prompt: types.ModelInput,
+        num_samples: int,
+        sampling_params: types.SamplingParams,
+        include_prompt_logprobs: bool = False,
+        topk_prompt_logprobs: int = 0,
+    ) -> types.SampleResponse:
+        """Async version of sample."""
+        return await AwaitableConcurrentFuture(
+            self.sample(
+                prompt,
+                num_samples,
+                sampling_params,
+                include_prompt_logprobs,
+                topk_prompt_logprobs,
+            )
+        )
+
+    @capture_exceptions(fatal=True)
+    def compute_logprobs(self, prompt: types.ModelInput) -> ConcurrentFuture[list[float | None]]:
+        """Compute log probabilities for prompt tokens.
+
+        Args:
+        - `prompt`: The input tokens as ModelInput
+
+        Returns:
+        - A `Future` containing a list of log probabilities for each token in the prompt.
+            None values indicate tokens where log probabilities couldn't be computed.
+
+        Example:
+        ```python
+        prompt = types.ModelInput.from_ints(tokenizer.encode("Hello world"))
+        future = sampling_client.compute_logprobs(prompt)
+        logprobs = future.result()
+        for i, logprob in enumerate(logprobs):
+            if logprob is not None:
+                print(f"Token {i}: logprob = {logprob:.4f}")
+        ```
+        """
+        if self._sampling_client_sidecar_handle is not None:
+            return self._sampling_client_sidecar_handle.submit_rpc(
+                _ComputeLogprobsRPC(prompt=prompt)
+            )
+
+        async def _compute_logprobs_async() -> list[float | None]:
+            sample_res = await self._sample_async_impl(
+                prompt,
+                num_samples=1,
+                sampling_params=types.SamplingParams(max_tokens=1),
+                include_prompt_logprobs=True,
+                request_kind="compute_logprobs",
+            )
+            return cast(list[float | None], sample_res.prompt_logprobs)
+
+        @capture_exceptions(fatal=True)
+        async def _compute_logprobs_async_with_retries() -> list[float | None]:
+            return await self.retry_handler.execute(_compute_logprobs_async)
+
+        return self.holder.run_coroutine_threadsafe(_compute_logprobs_async_with_retries()).future()
+
+    async def compute_logprobs_async(self, prompt: types.ModelInput) -> list[float | None]:
+        """Async version of compute_logprobs."""
+        return await AwaitableConcurrentFuture(self.compute_logprobs(prompt))
+
+    def _get_sampler_submit(self) -> AwaitableConcurrentFuture[types.GetSamplerResponse]:
+        async def _get_sampler_async() -> types.GetSamplerResponse:
+            async def _send_request() -> types.GetSamplerResponse:
+                with self.holder.aclient(ClientConnectionPoolType.TRAIN) as client:
+                    return await client.get(
+                        f"/api/v1/samplers/{self._sampling_session_id}",
+                        cast_to=types.GetSamplerResponse,
+                    )
+
+            return await self.holder.execute_with_retries(_send_request)
+
+        return self.holder.run_coroutine_threadsafe(_get_sampler_async())
+
+    @capture_exceptions(fatal=True)
+    def get_tokenizer(self) -> PreTrainedTokenizer:
+        """Get the tokenizer for the current model.
+
+        Returns:
+        - `PreTrainedTokenizer` compatible with the model
+        """
+        sampler_info = self._get_sampler_submit().result()
+        return _load_tokenizer_from_model_info(sampler_info.base_model)
+
+    @capture_exceptions(fatal=True)
+    def get_base_model(self) -> str:
+        """Get the base model name for the current sampling session."""
+        return self._get_sampler_submit().result().base_model
+
+    async def get_base_model_async(self) -> str:
+        """Async version of get_base_model."""
+        return (await self._get_sampler_submit()).base_model
+
+    def get_telemetry(self) -> Telemetry | None:
+        return self.holder.get_telemetry()
+
+    def __reduce__(self) -> tuple[Any, tuple[_SamplingClientPickleState]]:
+        """Enable pickling of SamplingClient for subprocess use.
+
+        Serializes into a ``_SamplingClientPickleState`` dataclass. The
+        ``_sampling_client_sidecar_handle`` handle is deliberately omitted — only a
+        bool flag is stored. The unpickled copy creates its own handle via
+        the per-process sidecar singleton. Do not add ``__getstate__``
+        without preserving this behavior.
+        """
+        return (
+            _unpickle_sampling_client,
+            (
+                _SamplingClientPickleState(
+                    session_id=self.holder.get_session_id(),
+                    sampling_session_id=self._sampling_session_id,
+                    constructor_kwargs=self.holder._constructor_kwargs,
+                    subprocess_sampling=self._sampling_client_sidecar_handle is not None,
+                ),
+            ),
+        )
+
+    def on_queue_state_change(
+        self, queue_state: QueueState, queue_state_reason: str | None
+    ) -> None:
+        QUEUE_STATE_LOG_INTERVAL = 60
+        try:
+            self.holder.note_sampling_queue_state(
+                queue_state.value,
+                queue_state_reason=queue_state_reason,
+            )
+        except TypeError:
+            self.holder.note_sampling_queue_state(queue_state.value)
+        if queue_state == QueueState.ACTIVE:
+            return
+        if time.time() - self._last_queue_state_logged < QUEUE_STATE_LOG_INTERVAL:
+            return
+        if not queue_state_reason:
+            if queue_state == QueueState.PAUSED_RATE_LIMIT:
+                queue_state_reason = "concurrent sampler weights limit hit"
+            elif queue_state == QueueState.PAUSED_CAPACITY:
+                queue_state_reason = "Cybernetics backend is running short on capacity, please wait"
+            else:
+                queue_state_reason = "unknown"
+        self._last_queue_state_logged = time.time()
+
+        logger.warning(
+            f"Sampling is paused for sampler {self._sampling_session_id}. Reason: {queue_state_reason}"
+        )
+
+
+def _unpickle_sampling_client(state: _SamplingClientPickleState) -> SamplingClient:
+    """Reconstruct a SamplingClient from pickled state.
+
+    Creates a shadow InternalClientHolder and builds a new SamplingClient.
+    Subprocess enablement is handled by the constructor.
+    """
+    from ..internal_client_holder import InternalClientHolder
+
+    holder = InternalClientHolder.get_shadow_holder(state.session_id, state.constructor_kwargs)
+    return SamplingClient(
+        holder,
+        sampling_session_id=state.sampling_session_id,
+        shadow=True,
+        subprocess_sampling=state.subprocess_sampling,
+    )
+
+
+@lru_cache(maxsize=100)
+def _get_retry_handler(
+    name: str, retry_config: RetryConfig | None = None, telemetry: Telemetry | None = None
+) -> RetryHandler:
+    retry_config = retry_config or RetryConfig()
+    return RetryHandler(config=retry_config, name=name, telemetry=telemetry)
+
+
+@lru_cache(maxsize=32)
+def _load_tokenizer_from_model_info(
+    model_name: str, tokenizer_id: str | None = None
+) -> PreTrainedTokenizer:
+    """Load a tokenizer given a model name and optional tokenizer_id.
+
+    This is a shared helper used by both TrainingClient and SamplingClient.
+
+    Args:
+        model_name: The model name (e.g., "Qwen/Qwen3-8B")
+        tokenizer_id: Optional explicit tokenizer ID. If None, heuristics are applied.
+
+    Returns:
+        The loaded PreTrainedTokenizer
+    """
+    try:
+        from transformers.models.auto.tokenization_auto import AutoTokenizer
+    except ImportError as exc:
+        raise ImportError(
+            "get_tokenizer() requires the optional 'transformers' dependency. "
+            "Install it with: pip install 'cybernetic-physics[tokenizers]'"
+        ) from exc
+
+    model_name = model_name.split(":")[0]
+
+    # Use tokenizer_id if provided, otherwise fall back to heuristic logic
+    kwargs = {}
+    if tokenizer_id is None:
+        # We generally adhere to the huggingface convention of "<org>/<model>" but
+        # in some cases we'll deploy variants using the format
+        # "<org>/<model>/<variant>". In that case, we want to load the tokenizer
+        # using the huggingface convention.
+        if model_name.startswith("meta-llama/Llama-3"):
+            # Avoid gating of Llama 3 models:
+            tokenizer_id = "thinkingmachineslabinc/meta-llama-3-instruct-tokenizer"
+        elif model_name.count("/") == 2:
+            org, model, _variant = model_name.split("/", 2)
+            tokenizer_id = f"{org}/{model}"
+        else:
+            tokenizer_id = model_name
+
+    if tokenizer_id.startswith("TML/"):
+        from tml_tokenizers.worldlines_tokenizers import get_worldlines_tokenizer
+
+        if (tokenizer := get_worldlines_tokenizer(tokenizer_id)) is not None:
+            return tokenizer
+
+    if tokenizer_id == "moonshotai/Kimi-K2-Thinking":
+        kwargs = {
+            "trust_remote_code": True,
+            "revision": "612681931a8c906ddb349f8ad0f582cb552189cd",
+        }
+
+    if tokenizer_id in ("moonshotai/Kimi-K2.5-Text-Only", "moonshotai/Kimi-K2.5"):
+        tokenizer_id = "moonshotai/Kimi-K2.5"
+        kwargs = {
+            "trust_remote_code": True,
+            "revision": "2426b45b6af0da48d0dcce71bbce6225e5c73adc",
+        }
+
+    return AutoTokenizer.from_pretrained(tokenizer_id, fast=True, **kwargs)

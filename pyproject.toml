@@ -1,0 +1,158 @@
+[project]
+name = "cybernetic-physics"
+version = "0.16.1"
+description = "Cybernetics Python SDK for hosted rollout, sampling, and training control"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+  { name = "Cybernetic Physics", email = "sdk@cyberneticphysics.com" },
+]
+keywords = ["cybernetics", "rollouts", "reinforcement learning", "machine learning"]
+dependencies = [
+  "httpx[http2]>=0.23.0, <1",
+  "pydantic>=1.9.0, <3",
+  "typing-extensions>=4.10, <5",
+  "anyio>=3.5.0, <5",
+  "distro>=1.7.0, <2",
+  "sniffio",
+  "numpy",            # CORE: top-level import in types/tensor_data.py + types/datum.py
+  "rich>=13.0.0",
+  "click>=8.0.0",
+]
+
+requires-python = ">= 3.11"
+classifiers = [
+  "Typing :: Typed",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: OS Independent",
+  "Operating System :: POSIX",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "License :: OSI Approved :: Apache Software License",
+]
+
+[project.scripts]
+cybernetics = "cybernetics.cli.__main__:cli"
+
+[project.urls]
+Homepage = "https://github.com/cybernetic-physics/cybernetic"
+Repository = "https://github.com/cybernetic-physics/cybernetic"
+Documentation = "https://github.com/cybernetic-physics/cybernetic#readme"
+
+[project.optional-dependencies]
+# transformers is heavy and only lazily imported by get_tokenizer(); keep it out of core.
+tokenizers = ["transformers"]
+aiohttp = ["aiohttp", "httpx_aiohttp>=0.1.8"]
+torch = ["torch"]
+all = ["cybernetic-physics[tokenizers,aiohttp,torch]"]
+
+[tool.uv]
+managed = true
+required-version = ">=0.5.0"
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "respx",
+  "ruff",
+  # Build backend for the hermetic packaging-boundary test (build --no-isolation).
+  "build",
+  "hatchling==1.26.3",
+  "hatch-fancy-pypi-readme",
+]
+
+[build-system]
+requires = ["hatchling==1.26.3", "hatch-fancy-pypi-readme"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["src/*"]
+
+[tool.hatch.build.targets.wheel]
+# The load-bearing line: only the cybernetics import package ships.
+packages = ["src/cybernetics"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/*.toml",
+  "/*.json",
+  "/*.lock",
+  "/*.md",
+  "/mypy.ini",
+  "/examples/*",
+  "src/*",
+  "tests/*",
+]
+# Belt-and-suspenders: the src-layout already excludes the backend, but make the
+# secret/host boundary explicit so a stray path can never enter a distribution.
+exclude = [
+  "**/worldlines_backend",
+  "**/worldlines_backend/**",
+  "deploy/**",
+  "**/*.sky.yaml",
+  "**/*vast*.yaml",
+  "**/sky-config*.yaml",
+  "**/.skyignore",
+  "**/Dockerfile",
+  "**/*.env*",
+  "**/*.tfvars",
+  "**/*.pem",
+  "**/*.key",
+]
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+# Rewrite relative links to absolute links on the public SDK repo.
+pattern = '\[(.+?)\]\(((?!https?://)\S+?)\)'
+replacement = '[\1](https://github.com/cybernetic-physics/cybernetic/tree/main/\g<2>)'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+force-exclude = true
+
+[tool.ruff.lint]
+# Ported from the upstream client .ruff.toml so the migrated generated tree lints
+# under the same rules it was authored against.
+select = [
+  "B905",
+  "F",
+  "E",
+  "W",
+  "I001",
+  "PIE804",
+  "PIE800",
+  "PIE796",
+  "PIE794",
+  "PIE807",
+  "PIE810",
+  "FLY002",
+  "COM818",
+  "SIM",
+  "Q000",
+  "TC004",
+  "TC005",
+]
+ignore = ["E501", "E721", "SIM105", "SIM108", "SIM117"]
+unfixable = ["B905"]
+extend-safe-fixes = ["TC004", "TC005"]
+
+[tool.ruff.lint.per-file-ignores]
+# The generated package root deliberately defines the `Cybernetics` alias between
+# import groups (so error __module__ rewrites point at the package root).
+"src/cybernetics/__init__.py" = ["E402"]
