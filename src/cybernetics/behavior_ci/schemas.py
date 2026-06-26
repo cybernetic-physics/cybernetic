@@ -211,6 +211,10 @@ class SessionConfig:
     camera: str
     env_id: Optional[str] = None
     gpu_spec: Optional[str] = None
+    # Optional dedicated-instance request (e.g. "vast"); only honored for callers
+    # allowed to select runtime (system admins / service accounts). Defaults to
+    # the platform warm pool when unset.
+    runtime_provider: Optional[str] = None
     idle_timeout_minutes: int = 120
     ready_timeout_seconds: int = 900
     # Author-at-runtime: spawn this robot, upload this repo module, and call its
@@ -283,6 +287,7 @@ class BehaviorCiConfig:
                 camera=sess.get("camera", ""),
                 env_id=sess.get("env_id"),
                 gpu_spec=sess.get("gpu_spec"),
+                runtime_provider=sess.get("runtime_provider"),
                 idle_timeout_minutes=int(sess.get("idle_timeout_minutes", 120)),
                 ready_timeout_seconds=int(sess.get("ready_timeout_seconds", 900)),
                 spawn_robot=sess.get("spawn_robot"),

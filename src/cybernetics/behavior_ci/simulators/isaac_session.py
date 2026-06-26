@@ -63,7 +63,8 @@ class IsaacSessionAdapter:
         module_source: Optional[str] = None,
         module_name: str = "behavior_ci_env",
         setup_entrypoint: Optional[str] = None,
-        isaac_ready_timeout: float = 180.0,
+        isaac_ready_timeout: float = 600.0,
+        runtime_provider: Optional[str] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.mcp_url = (mcp_url or base_url).rstrip("/")
@@ -85,6 +86,7 @@ class IsaacSessionAdapter:
         self.module_name = module_name
         self.setup_entrypoint = setup_entrypoint
         self.isaac_ready_timeout = isaac_ready_timeout
+        self.runtime_provider = runtime_provider
         self.session_id: Optional[str] = None
         self._rpc_id = 0
         self._owns_client = http_client is None
@@ -121,6 +123,8 @@ class IsaacSessionAdapter:
             body["workspaceId"] = self.workspace_id
         if self.cfg.gpu_spec:
             body["gpuSpec"] = self.cfg.gpu_spec
+        if self.runtime_provider:
+            body["runtimeProvider"] = self.runtime_provider
 
         created = self._cp("POST", "/v1/sessions", json_body=body)
         self.session_id = created.get("sessionId") or created.get("id")
@@ -128,6 +132,13 @@ class IsaacSessionAdapter:
             raise IsaacSessionError(f"session create returned no id: {created}")
 
         self._await_ready(self.cfg.ready_timeout_seconds)
+
+        # `runtimeStatus=running` only means the session runtime is up; the Isaac
+        # extension (and, for a restored env, the loaded stage) may still be coming
+        # online. Block on a real Isaac MCP ping before uploading modules or
+        # measuring — the gateway gates commands on isaac_extension_ready, so a
+        # successful ping means the extension is actually serving.
+        self._await_isaac_ready()
 
         # Author-at-runtime: spawn the robot, upload the repo module, build + calibrate
         # the scene — so a fresh blank session is fully set up from the repo, with no
@@ -159,12 +170,20 @@ class IsaacSessionAdapter:
                 )
 
         # Verify the pass/fail camera exists (get_scene_info has no prim list).
-        out = self._mcp("isaac.execute_script", {"code": _camera_check_script(scene.camera)})
-        if "CAMERA_OK" not in (out.get("stdout") or ""):
-            raise IsaacSessionError(
-                f"required pass/fail camera '{scene.camera}' not present after setup "
-                f"(env '{env_id or scene.scene_env}')"
-            )
+        # When loading a saved env, the restored stage can open slightly after the
+        # extension reports ready, so poll for the camera prim rather than checking
+        # once — a missing camera after the deadline is a real authoring error.
+        deadline = time.monotonic() + self.isaac_ready_timeout
+        while True:
+            out = self._mcp("isaac.execute_script", {"code": _camera_check_script(scene.camera)})
+            if "CAMERA_OK" in (out.get("stdout") or ""):
+                break
+            if time.monotonic() >= deadline:
+                raise IsaacSessionError(
+                    f"required pass/fail camera '{scene.camera}' not present after setup "
+                    f"(env '{env_id or scene.scene_env}')"
+                )
+            time.sleep(self.poll_interval_seconds)
 
     def _await_isaac_ready(self) -> None:
         """Poll a trivial script until the Isaac extension responds (post asset-load)."""
@@ -177,7 +196,10 @@ class IsaacSessionAdapter:
             except IsaacSessionError:
                 pass
             if time.monotonic() >= deadline:
-                raise IsaacSessionError("Isaac extension did not come back ready after robot spawn")
+                raise IsaacSessionError(
+                    "Isaac extension did not become ready (no MCP response within "
+                    f"{self.isaac_ready_timeout:.0f}s)"
+                )
             time.sleep(self.poll_interval_seconds)
 
     def _upload_module(self) -> None:
@@ -219,9 +241,20 @@ class IsaacSessionAdapter:
                     status = str(info.get("status", "")).lower()
                     if status in _TERMINAL_BAD:
                         raise IsaacSessionError(f"session entered terminal state '{status}'")
-                    if status in {"running", "idle"} and _bridge_ready(info):
+                    runtime_status = str(info.get("runtimeStatus", "")).lower()
+                    # The control plane surfaces neko/session runtime readiness
+                    # (`runtimeStatus`) but does not currently echo the Isaac
+                    # extension flag (`isaac_extension_ready`) on the session GET,
+                    # so accept either signal here and confirm the Isaac extension
+                    # itself via an MCP ping in `_await_isaac_ready` before any work.
+                    if status in {"running", "idle"} and (
+                        _bridge_ready(info) or runtime_status == "running"
+                    ):
                         return
-                    last = f"status={status or 'unknown'}, bridge not ready"
+                    last = (
+                        f"status={status or 'unknown'}, "
+                        f"runtime={runtime_status or 'unknown'}, bridge not ready"
+                    )
                 else:
                     last = f"HTTP {resp.status_code}"  # transient; keep polling
             if time.monotonic() >= deadline:
@@ -289,8 +322,11 @@ class IsaacSessionAdapter:
             wanted.append(("replay-passed", None))
 
         replays: List[ReplayResult] = []
-        for name, run in wanted:
+        for name, _run in wanted:
             out_path = f"{_MEDIA_DIR}/{name}.mp4"
+            # The hosted isaac.capture_video records the current viewport from the
+            # named camera; it has no per-run replay parameter, so capture the
+            # settled scene as-is (the pass/fail camera frames the weld point).
             self._mcp(
                 "isaac.capture_video",
                 {
@@ -298,7 +334,6 @@ class IsaacSessionAdapter:
                     "camera_prim_path": scene.camera,
                     "duration_seconds": self.replay_duration_seconds,
                     "fps": self.replay_fps,
-                    "replay_run": run,
                 },
             )
             dl = self._mcp(
@@ -354,6 +389,14 @@ class IsaacSessionAdapter:
 
     def _mcp(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         self._rpc_id += 1
+        # The gateway's isaac.* tools resolve the target session from a
+        # `session_id` argument (or a previously set active session); the
+        # X-Session-Id header alone is not used for that resolution. This
+        # headless adapter never calls sessions.set_active, so pass the session
+        # id explicitly on every call to avoid NO_ACTIVE_SESSION.
+        args = dict(arguments)
+        if self.session_id and "session_id" not in args:
+            args["session_id"] = self.session_id
         resp = self._send(
             "POST",
             f"{self.mcp_url}/mcp",
@@ -361,7 +404,7 @@ class IsaacSessionAdapter:
                 "jsonrpc": "2.0",
                 "id": self._rpc_id,
                 "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
+                "params": {"name": name, "arguments": args},
             },
             headers={
                 "Authorization": f"Bearer {self.mcp_api_key}",

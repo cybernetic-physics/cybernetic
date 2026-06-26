@@ -208,6 +208,7 @@ class BehaviorCiRunner:
             module_source=module_source,
             module_name=module_name,
             setup_entrypoint=cfg.session.setup_entrypoint,
+            runtime_provider=cfg.session.runtime_provider,
         )
 
     def _enforce_provenance(self, replay_source: str) -> None:
