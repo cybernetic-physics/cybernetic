@@ -32,6 +32,11 @@ _REPLAY_MAX_BYTES = 25 * 1024 * 1024
 _TERMINAL_BAD = {"failed", "terminated", "stopped", "error", "snapshot_failed"}
 # Transient HTTP statuses to retry/tolerate (gateway blips during cold boot).
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+# Transient MCP-tool error codes: the bridge can briefly report the Isaac
+# extension as not-ready mid-run (e.g. while a video capture keeps the main
+# thread busy). These are retryable — a hard failure here would turn a real
+# behavior verdict into a spurious infrastructure (exit 3) failure.
+_TRANSIENT_ISAAC_CODES = {"ISAAC_UNREACHABLE", "BRIDGE_OFFLINE"}
 
 
 class IsaacSessionError(Exception):
@@ -388,7 +393,6 @@ class IsaacSessionAdapter:
         return resp.json()
 
     def _mcp(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        self._rpc_id += 1
         # The gateway's isaac.* tools resolve the target session from a
         # `session_id` argument (or a previously set active session); the
         # X-Session-Id header alone is not used for that resolution. This
@@ -397,34 +401,50 @@ class IsaacSessionAdapter:
         args = dict(arguments)
         if self.session_id and "session_id" not in args:
             args["session_id"] = self.session_id
-        resp = self._send(
-            "POST",
-            f"{self.mcp_url}/mcp",
-            json={
-                "jsonrpc": "2.0",
-                "id": self._rpc_id,
-                "method": "tools/call",
-                "params": {"name": name, "arguments": args},
-            },
-            headers={
-                "Authorization": f"Bearer {self.mcp_api_key}",
-                "X-Session-Id": self.session_id or "",
-                "Accept": "application/json",
-            },
-        )
-        if resp.status_code >= 400:
-            raise IsaacSessionError(f"MCP {name} -> {resp.status_code}: {resp.text[:300]}")
-        body = resp.json()
-        if "error" in body and body["error"]:
-            raise IsaacSessionError(f"MCP {name} error: {body['error']}")
-        try:
-            text = body["result"]["content"][0]["text"]
-            payload = json.loads(text)
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise IsaacSessionError(f"MCP {name}: malformed result envelope: {exc}") from exc
-        if not payload.get("ok", False):
+
+        last_transient: Optional[Dict[str, Any]] = None
+        for attempt in range(self._max_retries + 1):
+            self._rpc_id += 1
+            resp = self._send(
+                "POST",
+                f"{self.mcp_url}/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": self._rpc_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": args},
+                },
+                headers={
+                    "Authorization": f"Bearer {self.mcp_api_key}",
+                    "X-Session-Id": self.session_id or "",
+                    "Accept": "application/json",
+                },
+            )
+            if resp.status_code >= 400:
+                raise IsaacSessionError(f"MCP {name} -> {resp.status_code}: {resp.text[:300]}")
+            body = resp.json()
+            if "error" in body and body["error"]:
+                raise IsaacSessionError(f"MCP {name} error: {body['error']}")
+            try:
+                text = body["result"]["content"][0]["text"]
+                payload = json.loads(text)
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise IsaacSessionError(f"MCP {name}: malformed result envelope: {exc}") from exc
+            if payload.get("ok", False):
+                return payload.get("data", {})
+            # Not ok: retry transient isaac-readiness blips (the extension can go
+            # briefly unreachable mid-run) so a flap doesn't become an exit-3
+            # infra failure; everything else is a real, immediate error.
+            err = payload.get("error") or {}
+            code = err.get("code") if isinstance(err, dict) else None
+            if code in _TRANSIENT_ISAAC_CODES and attempt < self._max_retries:
+                last_transient = payload
+                time.sleep(min(self._retry_backoff * (2**attempt), 15.0))
+                continue
             raise IsaacSessionError(f"MCP {name} not ok: {payload}")
-        return payload.get("data", {})
+        raise IsaacSessionError(  # pragma: no cover - transient persisted past retries
+            f"MCP {name}: isaac stayed unreachable after {self._max_retries} retries: {last_transient}"
+        )
 
 
 def _bridge_ready(info: Dict[str, Any]) -> bool:
