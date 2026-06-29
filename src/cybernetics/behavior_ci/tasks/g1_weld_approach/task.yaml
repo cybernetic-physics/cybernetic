@@ -1,0 +1,21 @@
+schema_version: behavior-ci-task/v1
+task_id: g1_weld_approach
+behavior: g1_weld_approach
+robot: Unitree G1-compatible humanoid proxy
+world: tabletop_welding_obstacle_shift_v1
+
+# The scene + grader + saved Isaac environment are OWNED BY THIS PACK (the installed SDK),
+# not by the candidate repo. The runner takes env_id, the grader module, and the
+# pass/fail camera from here for a pinned task, so a policy PR cannot repoint them.
+scene_env: behavior-ci-tabletop-welding
+camera: /World/Cameras/BehaviorCI_PassFailCamera
+env_id: env_7d904291a384a1ae
+
+# Fixed in-session entrypoint. The policy manifest can no longer choose which function
+# grades it (the v2 manifest has no session_entrypoint field).
+grader_entrypoint: behavior_ci_run_trial
+grader_module: grader.py
+
+# The policy emits an action (a trajectory) per observation; the environment measures it.
+action_contract: trajectory/v1
+eval: eval.yaml
