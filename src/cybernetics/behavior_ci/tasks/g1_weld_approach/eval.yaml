@@ -1,0 +1,65 @@
+schema_version: behavior-ci-eval/v1
+world: tabletop_welding_obstacle_shift_v1
+behavior: g1_weld_approach
+runs: 8
+
+# Pass/fail rules applied to each trial's MEASURED metrics. A required check that fails on
+# any trial fails that trial; the run is green only if every trial (visible AND held-out)
+# passes. These thresholds are authoritative and pinned (see lock.json) -- they live in the
+# installed SDK task pack, NOT in the candidate repo, so a policy PR cannot loosen them.
+checks:
+  target_reach:
+    metric: torch_tip_distance_to_target_cm
+    operator: "<="
+    value: 2.0
+    required: true
+  collision_free:
+    metric: collision_count
+    operator: "=="
+    value: 0
+    required: true
+  safety_zone_clear:
+    metric: restricted_zone_intrusions
+    operator: "=="
+    value: 0
+    required: true
+  base_stable:
+    metric: max_base_tilt_degrees
+    operator: "<="
+    value: 5.0
+    required: true
+  timeout_free:
+    metric: elapsed_seconds
+    operator: "<"
+    value: 30
+    required: true
+
+# VISIBLE scenarios: the published obstacle-shift suite. Each scenario sets where the
+# obstacle is shifted; the environment places it and INDEPENDENTLY measures the trajectory
+# the policy emits. There is no per-scenario "required clearance" the policy can read --
+# the policy must route around the actually-observed obstacle. Golden stress mapping:
+# index 3 -> safety_zone, index 5 -> collision, index 7 -> timeout.
+scenarios:
+  - {obstacle_offset_cm: 8.0, stresses: null}
+  - {obstacle_offset_cm: 12.0, stresses: null}
+  - {obstacle_offset_cm: 16.0, stresses: null}
+  - {obstacle_offset_cm: 20.0, stresses: safety_zone}
+  - {obstacle_offset_cm: 18.0, stresses: null}
+  - {obstacle_offset_cm: 24.0, stresses: collision}
+  - {obstacle_offset_cm: 22.0, stresses: null}
+  - {obstacle_offset_cm: 34.0, stresses: timeout}
+
+# HELD-OUT perturbation bank: shipped ONLY inside the SDK pack, never copied into any
+# candidate eval. A policy fit to the 8 visible points but not genuinely obstacle-relative
+# fails here. The 'ceiling' row forbids an over-detour (apex >= 48) while the large-offset
+# rows require apex >= 56/64, so NO fixed geometry-blind apex can clear the whole family --
+# only a policy that sizes its detour to each observed obstacle passes.
+held_out:
+  - {obstacle_offset_cm: 9.0, stresses: null}
+  - {obstacle_offset_cm: 15.0, stresses: null}
+  - {obstacle_offset_cm: 21.0, stresses: safety_zone}
+  - {obstacle_offset_cm: 27.0, stresses: collision}
+  - {obstacle_offset_cm: 20.0, stresses: timeout}
+  - {obstacle_offset_cm: 24.0, stresses: ceiling}
+  - {obstacle_offset_cm: 50.0, stresses: null}
+  - {obstacle_offset_cm: 58.0, stresses: null}

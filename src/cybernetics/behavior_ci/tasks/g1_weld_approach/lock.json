@@ -1,0 +1,12 @@
+{
+  "schema_version": "behavior-ci-tasklock/v1",
+  "task_version": "1",
+  "grader_entrypoint": "behavior_ci_run_trial",
+  "digests": {
+    "eval.yaml": "9755bcc2234069c008cef10f80f551bb912d3a82d380afca12f8a1d575fd14d1",
+    "planner.py": "c67e890aade0659806f37d416cff8c0a7f45de7c54644440409aba4bd01fb555",
+    "measure.py": "11ca80788944bf30c4b3e901ede66b5ca58425522012b0b812c96edae8b9dcbf",
+    "scenarios.py": "832646180c8e9f87ce9501f4f6463d85ab759ffe483e37c17276a821b6f9976c"
+  },
+  "candidate_copies": {}
+}
