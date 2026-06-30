@@ -19,9 +19,34 @@ from typing import Any, Callable, Dict, List, Optional
 RESULT_SCHEMA_VERSION = "behavior-ci/v1"
 METRICS_SCHEMA_VERSION = "behavior-ci-metrics/v1"
 CONFIG_SCHEMA_VERSION = "cybernetic-behavior-ci-config/v1"
-POLICY_SCHEMA_VERSION = "behavior-ci-policy/v1"
+POLICY_SCHEMA_VERSION = "behavior-ci-policy/v2"
 TASK_SCHEMA_VERSION = "behavior-ci-task/v1"
 EVAL_SCHEMA_VERSION = "behavior-ci-eval/v1"
+
+# Accepted policy-manifest schema versions. v2 is the closed-capability format (the policy
+# carries only an opaque ``checkpoint`` + a pinned ``task``, and unknown top-level keys are
+# rejected, so a policy cannot smuggle a grader-readable number or a ``session_entrypoint``
+# capability). v1 (legacy ``controller`` manifests) is still parsed during migration.
+POLICY_SCHEMA_VERSIONS = ("behavior-ci-policy/v1", "behavior-ci-policy/v2")
+
+# Top-level keys a v2 policy manifest may carry. The schema is CLOSED: anything else is a
+# ConfigError. This is a structural anti-gaming boundary -- there is no field through which
+# a policy can hand the grader a trusted scalar or choose which function grades it.
+POLICY_V2_ALLOWED_KEYS = frozenset(
+    {
+        "schema_version",
+        "policy_id",
+        "display_filename",
+        "behavior",
+        "robot",
+        "backend",
+        "task",
+        "checkpoint",
+        "provenance",
+        "expected_demo_result",
+        "notes",
+    }
+)
 
 # Recognized policy backends. Only ``real-vla`` claims a real learned policy; the
 # rest must report ``policy_backend_real_vla = false`` in provenance.
@@ -113,6 +138,10 @@ class EvalSpec:
     # Per-run obstacle placement / domain randomization, keyed by run index.
     # Keeps the fixture model honest-and-readable instead of hidden run-id hacks.
     scenarios: List[Dict[str, Any]] = field(default_factory=list)
+    # Held-out perturbation bank (pinned task packs only): scenarios shipped inside the SDK
+    # and never copied into a candidate eval, so a policy fit to the visible set but not
+    # genuinely obstacle-relative fails here. Graded alongside ``scenarios``.
+    held_out: List[Dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EvalSpec":
@@ -129,15 +158,20 @@ class EvalSpec:
             runs=runs,
             checks=checks,
             scenarios=list(data.get("scenarios", [])),
+            held_out=list(data.get("held_out", [])),
         )
 
 
 @dataclass(frozen=True)
 class PolicyManifest:
-    """A policy reference. For the demo, ``.pt`` files are honest JSON manifests.
+    """A policy reference (a ``.pt`` JSON manifest).
 
-    ``controller`` carries *readable* parameters (e.g. ``clearance_margin_cm``)
-    that drive behavior, rather than a hidden lookup by ``policy_id``.
+    v2 (closed capability): the policy carries only an opaque ``checkpoint`` consumed by the
+    backend planner, plus a pinned ``task`` id. The grader NEVER reads a manifest field as
+    ground truth, and unknown top-level keys are rejected -- so there is no scalar to
+    self-attest with and no ``session_entrypoint`` to smuggle.
+
+    v1 (legacy): a free-form ``controller`` dict. Still parsed during migration.
     """
 
     schema_version: str
@@ -146,33 +180,70 @@ class PolicyManifest:
     behavior: str
     robot: str
     backend: str
-    controller: Dict[str, Any]
+    task: Optional[str] = None
+    checkpoint: Dict[str, Any] = field(default_factory=dict)
+    controller: Dict[str, Any] = field(default_factory=dict)
     expected_demo_result: Optional[str] = None
     notes: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PolicyManifest":
-        _check_schema(data, POLICY_SCHEMA_VERSION, "policy manifest")
+        version = data.get("schema_version")
+        if version not in POLICY_SCHEMA_VERSIONS:
+            raise ConfigError(
+                f"policy manifest: schema_version must be one of "
+                f"{list(POLICY_SCHEMA_VERSIONS)}, got {version!r}"
+            )
         backend = _require(data, "backend", "policy manifest")
         if backend not in POLICY_BACKENDS:
             raise ConfigError(
                 f"policy manifest: backend must be one of {list(POLICY_BACKENDS)}, got {backend!r}"
             )
-        return cls(
-            schema_version=data["schema_version"],
+        common = dict(
+            schema_version=version,
             policy_id=_require(data, "policy_id", "policy manifest"),
             display_filename=_require(data, "display_filename", "policy manifest"),
             behavior=_require(data, "behavior", "policy manifest"),
             robot=_require(data, "robot", "policy manifest"),
             backend=backend,
-            controller=dict(_require(data, "controller", "policy manifest")),
             expected_demo_result=data.get("expected_demo_result"),
             notes=data.get("notes") or data.get("training_note"),
+        )
+        if version == "behavior-ci-policy/v2":
+            unknown = set(data) - POLICY_V2_ALLOWED_KEYS
+            if unknown:
+                raise ConfigError(
+                    "policy manifest (v2): unknown top-level key(s) "
+                    f"{sorted(unknown)}; the schema is closed -- a policy may carry only an "
+                    "opaque 'checkpoint' and a pinned 'task' (no grader-readable params, no "
+                    "session_entrypoint)."
+                )
+            return cls(
+                task=_require(data, "task", "policy manifest"),
+                checkpoint=dict(_require(data, "checkpoint", "policy manifest")),
+                controller={},
+                **common,
+            )
+        # v1 legacy
+        return cls(
+            task=None,
+            checkpoint={},
+            controller=dict(_require(data, "controller", "policy manifest")),
+            **common,
         )
 
     @property
     def real_vla(self) -> bool:
         return self.backend == "real-vla"
+
+    @property
+    def is_v2(self) -> bool:
+        return self.schema_version == "behavior-ci-policy/v2"
+
+    @property
+    def params(self) -> Dict[str, Any]:
+        """Backend-facing opaque params: the v2 checkpoint, or the v1 controller."""
+        return self.checkpoint if self.is_v2 else self.controller
 
 
 @dataclass(frozen=True)
