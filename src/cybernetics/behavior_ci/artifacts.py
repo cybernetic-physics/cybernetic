@@ -108,6 +108,16 @@ def validate_bundle(bundle_dir: Path, result: BehaviorCiResult | None = None) ->
         ):
             problems.append("passing trials present but replays/replay-passed.mp4 is missing")
 
+        # Pinned Task Pack path: the bundle must be tamper-evident -- pins verified and the
+        # task/eval digests stamped into provenance.
+        if result.honesty.production_eval_path_used:
+            if not result.honesty.pins_verified:
+                problems.append("pinned-task bundle but honesty.pins_verified is false")
+            if not result.honesty.eval_sha256:
+                problems.append("pinned-task bundle missing honesty.eval_sha256 provenance")
+            if not result.honesty.task_id:
+                problems.append("pinned-task bundle missing honesty.task_id provenance")
+
     return problems
 
 

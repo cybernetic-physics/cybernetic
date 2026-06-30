@@ -99,6 +99,50 @@ def run(
     sys.exit(EXIT_OK if result.passed else EXIT_BEHAVIOR_FAIL)
 
 
+@cli.command("verify-task")
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
+@click.option("--policy-ref", required=True, help="Path to a v2 policy manifest (.pt).")
+def verify_task(config_path: str, policy_ref: str) -> None:
+    """Offline integrity gate (no secrets): validate the closed v2 manifest and confirm the
+    candidate's eval/grader copies match the pinned SDK Task Pack.
+
+    Exit 2 = bad manifest / unknown task; exit 4 = a candidate copy diverged from the pin.
+    """
+
+    from cybernetics.behavior_ci.runner import BehaviorCiRunner, _load_json
+    from cybernetics.behavior_ci.schemas import ConfigError, ContractError, PolicyManifest
+    from cybernetics.behavior_ci.tasks import load_task
+
+    try:
+        runner = BehaviorCiRunner.from_config(config_path)
+        manifest = PolicyManifest.from_dict(_load_json(runner._resolve(policy_ref)))
+        if not manifest.is_v2:
+            click.echo(
+                f"policy {policy_ref} is not a v2 pinned-task manifest "
+                "(no 'task'); migrate it to behavior-ci-policy/v2.",
+                err=True,
+            )
+            sys.exit(EXIT_INPUT)
+        task = load_task(manifest.task)
+        runner._enforce_pins(task)
+    except ConfigError as exc:
+        click.echo(f"input error: {exc}", err=True)
+        sys.exit(EXIT_INPUT)
+    except ContractError as exc:
+        click.echo(f"contract error: {exc}", err=True)
+        sys.exit(EXIT_CONTRACT)
+
+    lock = task.lock
+    version = lock.task_version if lock else "?"
+    eval_sha = (lock.digests.get("eval.yaml", "") if lock else "")[:12]
+    n_copies = len(lock.candidate_copies) if lock else 0
+    click.echo(
+        f"OK: task={task.task_id} version={version} pins_verified=true "
+        f"({n_copies} candidate copies checked) eval_sha256={eval_sha} "
+        f"grader_entrypoint={task.grader_entrypoint}"
+    )
+
+
 @cli.command("render-comment")
 @click.option("--artifact-dir", required=True, type=click.Path(exists=True))
 def render_comment(artifact_dir: str) -> None:
