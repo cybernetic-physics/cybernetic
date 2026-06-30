@@ -11,6 +11,17 @@ from cybernetics.behavior_ci import media, renderers
 from cybernetics.behavior_ci.artifacts import validate_bundle
 from cybernetics.behavior_ci.schemas import BehaviorCiResult, HonestyProvenance
 
+try:
+    import imageio_ffmpeg  # noqa: F401
+
+    _HAVE_FFMPEG = True
+except ImportError:  # the behavior-ci extra (imageio-ffmpeg) is optional
+    _HAVE_FFMPEG = False
+
+needs_ffmpeg = pytest.mark.skipif(
+    not _HAVE_FFMPEG, reason="imageio-ffmpeg (behavior-ci extra) not installed"
+)
+
 
 def _sample_mp4(tmp_path: Path) -> bytes:
     import imageio_ffmpeg
@@ -35,6 +46,7 @@ def _sample_mp4(tmp_path: Path) -> bytes:
     return out.read_bytes()
 
 
+@needs_ffmpeg
 def test_mp4_to_gif_produces_valid_capped_gif(tmp_path: Path):
     gif = media.mp4_to_gif(_sample_mp4(tmp_path))
     assert gif is not None
@@ -42,6 +54,7 @@ def test_mp4_to_gif_produces_valid_capped_gif(tmp_path: Path):
     assert len(gif) <= media.DEFAULT_SIZE_CAP
 
 
+@needs_ffmpeg
 def test_mp4_to_gif_handles_empty_and_garbage():
     assert media.mp4_to_gif(b"") is None
     with pytest.raises(Exception):
