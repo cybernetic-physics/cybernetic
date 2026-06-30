@@ -71,7 +71,7 @@ class BehaviorCiRunner:
         # grader and saved-scene env_id all come from the SDK-shipped Task Pack -- NOT from
         # any candidate-editable path. The policy may change only its opaque checkpoint, and
         # the environment measures the trajectory it emits. This is the trust boundary.
-        task = load_task(manifest.task) if manifest.is_v2 else None
+        task = self._load_task(manifest.task) if manifest.is_v2 else None
 
         if task is not None:
             if manifest.behavior != task.behavior:
@@ -154,8 +154,10 @@ class BehaviorCiRunner:
             notes=_provenance_note(adapter.adapter_id, replay_source),
             task_id=manifest.task,
             task_version=(task.lock.task_version if task and task.lock else None),
-            eval_sha256=(task.lock.digests.get("eval.yaml") if task and task.lock else None),
-            grader_sha256=(task.lock.digests.get("grader.py") if task and task.lock else None),
+            # Packaged tasks pin eval.yaml/grader.py; in-repo (taskkit) tasks pin task.py/
+            # grader_isaac.py. Record whichever exists so the bundle stays tamper-evident.
+            eval_sha256=_first_digest(task, "eval.yaml", "task.py"),
+            grader_sha256=_first_digest(task, "grader.py", "grader_isaac.py"),
             pins_verified=task is not None,
         )
 
@@ -195,6 +197,16 @@ class BehaviorCiRunner:
         return result
 
     # -- internals --------------------------------------------------------- #
+
+    def _load_task(self, task_id: str) -> Task:
+        """Resolve a v2 task id from the SDK pack ('packaged') or this repo ('repo')."""
+        ts = self.config.task_source or {"kind": "packaged"}
+        if ts.get("kind") == "repo":
+            from .taskkit import RepoTaskLoader
+
+            tasks_dir = self._resolve(ts.get("dir", "tasks"))
+            return RepoTaskLoader(tasks_dir).load(task_id)
+        return load_task(task_id)
 
     def _enforce_pins(self, task: Task) -> None:
         """For a pinned task, reject (and report) any in-repo readability copy that diverges
@@ -291,6 +303,15 @@ class BehaviorCiRunner:
         if eval_ref in self.config.evals:
             return self._resolve(self.config.evals[eval_ref])
         return self._resolve(eval_ref)
+
+
+def _first_digest(task, *names) -> Optional[str]:
+    if task is None or task.lock is None:
+        return None
+    for n in names:
+        if n in task.lock.digests:
+            return task.lock.digests[n]
+    return None
 
 
 def _normalized_manifest(

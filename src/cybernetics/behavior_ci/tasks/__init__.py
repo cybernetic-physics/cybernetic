@@ -108,7 +108,12 @@ def _read_text(task_id: str, name: str) -> Optional[str]:
 
 
 def load_task(task_id: str) -> Task:
-    """Load a packaged task by id. Raises ConfigError for an unknown/invalid pack."""
+    """Load a packaged task by id (back-compat alias for the packaged loader)."""
+    return _load_packaged_task(task_id)
+
+
+def _load_packaged_task(task_id: str) -> Task:
+    """Load a task embedded in the SDK package. Raises ConfigError for an unknown/invalid pack."""
     if not task_id or "/" in task_id or "." in task_id:
         raise ConfigError(f"invalid task id {task_id!r}")
     try:

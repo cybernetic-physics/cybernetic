@@ -316,6 +316,9 @@ class BehaviorCiConfig:
     mcp_url: Optional[str] = None
     workspace_id: Optional[str] = None
     policy_backends: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Where a v2 task id resolves from: a task embedded in the SDK ("packaged", default) or
+    # one authored in THIS repo under a tasks/ directory ("repo").
+    task_source: Dict[str, Any] = field(default_factory=lambda: {"kind": "packaged"})
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BehaviorCiConfig":
@@ -335,7 +338,13 @@ class BehaviorCiConfig:
                 f"config: artifacts.require_replay_provenance must be one of "
                 f"{list(REPLAY_SOURCES)}, got {require_prov!r}"
             )
-        evals = dict(_require(data, "evals", "config"))
+        task_source = dict(data.get("task_source", {"kind": "packaged"}))
+        if task_source.get("kind", "packaged") not in ("packaged", "repo"):
+            raise ConfigError(
+                f"config: task_source.kind must be 'packaged' or 'repo', got {task_source.get('kind')!r}"
+            )
+        # evals is only used by the legacy v1 candidate-resolved path; v2 tasks synthesize it.
+        evals = dict(data.get("evals", {}))
         # Allow either {name: "path.yaml"} or {name: {path: "..."}}.
         eval_paths = {
             name: (spec if isinstance(spec, str) else _require(spec, "path", f"evals.{name}"))
@@ -368,6 +377,7 @@ class BehaviorCiConfig:
             ),
             evals=eval_paths,
             policy_backends=dict(data.get("policy_backends", {})),
+            task_source=task_source,
         )
 
 
