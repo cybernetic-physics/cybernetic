@@ -127,6 +127,39 @@ def test_speed_is_clamped():
     assert traj["speed_mps"] <= planner.MAX_SPEED_MPS + 1e-9
 
 
+def test_hosted_grader_measure_matches_offline_fixture():
+    """No offline/hosted drift: the grader's embedded measure() must produce identical
+    metrics to the offline measure.py for every scenario + a range of checkpoints."""
+    from cybernetics.behavior_ci.tasks.g1_weld_approach import grader, measure
+
+    t = load_task("g1_weld_approach")
+    checkpoints = [
+        {
+            "detour_mode": "relative",
+            "detour_gain": g,
+            "clearance_margin_cm": m,
+            "top_halfwidth_cm": 30.0,
+            "approach_speed_mps": s,
+        }
+        for g in (0.0, 0.85, 1.0)
+        for m in (0.0, 6.5, 12.0)
+        for s in (0.075, 0.12)
+    ] + [
+        {
+            "detour_mode": "absolute",
+            "absolute_apex_cm": a,
+            "top_halfwidth_cm": 30.0,
+            "approach_speed_mps": 0.12,
+        }
+        for a in (40.0, 55.0, 69.0)
+    ]
+    for scenario in t.visible + t.held_out:
+        obs = t.build_observation(scenario)
+        for ck in checkpoints:
+            traj = t.plan(ck, obs)
+            assert grader.measure(traj, obs) == measure.measure(traj, obs)
+
+
 def test_lock_digests_match_pack_files():
     """The integrity lock must match the actual pinned bytes."""
     import importlib.resources as ir
