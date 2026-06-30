@@ -12,17 +12,39 @@ from typing import List
 from .schemas import BehaviorCiResult
 
 COMMENT_MARKER = "<!-- cybernetic-behavior-ci -->"
+# Stable placeholder the workflow substitutes with the inline replay GIF once it has been
+# published to an inline-capable URL. Anchoring to this HTML token (not a visible header)
+# keeps the image injection robust against header/wording changes.
+REPLAY_TOKEN = "<!-- cybernetic-behavior-ci:replay -->"
 _TAGLINE = (
     "CodeRabbit reviews whether the code looks right. "
     "Cybernetic Physics reviews whether the robot still works."
 )
 
 
-def render_comment(result: BehaviorCiResult, artifact_url: str = "") -> str:
+def replay_image_block(url: str, commit: str, camera: str) -> str:
+    """The SDK-owned markdown for an inline replay GIF (kept here so its format is tested)."""
+    return (
+        f"![Real Isaac G1 weld-approach replay — commit {commit}]({url})\n"
+        f"_{camera} · settled pass/fail camera_"
+    )
+
+
+def render_comment(
+    result: BehaviorCiResult, artifact_url: str = "", replay_gif_url: str = ""
+) -> str:
     s = result.summary
     verdict = "✅ **PASS**" if result.passed else "❌ **FAIL**"
+    # Replay slot: substitute the inline GIF when its URL is known, else leave the invisible
+    # token for `render-comment --replay-gif-url` to fill after the GIF is hosted.
+    replay_slot = (
+        replay_image_block(replay_gif_url, result.commit, result.camera)
+        if replay_gif_url
+        else REPLAY_TOKEN
+    )
     lines: List[str] = [
         COMMENT_MARKER,
+        replay_slot,
         f"## Cybernetic Physics — Behavior CI {verdict}",
         "",
         f"_{_TAGLINE}_",
