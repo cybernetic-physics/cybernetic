@@ -111,7 +111,6 @@ def verify_task(config_path: str, policy_ref: str) -> None:
 
     from cybernetics.behavior_ci.runner import BehaviorCiRunner, _load_json
     from cybernetics.behavior_ci.schemas import ConfigError, ContractError, PolicyManifest
-    from cybernetics.behavior_ci.tasks import load_task
 
     try:
         runner = BehaviorCiRunner.from_config(config_path)
@@ -123,7 +122,9 @@ def verify_task(config_path: str, policy_ref: str) -> None:
                 err=True,
             )
             sys.exit(EXIT_INPUT)
-        task = load_task(manifest.task)
+        # Resolve via the configured source (packaged or in-repo); the repo loader verifies the
+        # lock during load, the packaged path is checked via _enforce_pins.
+        task = runner._load_task(manifest.task)
         runner._enforce_pins(task)
     except ConfigError as exc:
         click.echo(f"input error: {exc}", err=True)
