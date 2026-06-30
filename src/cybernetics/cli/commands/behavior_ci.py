@@ -144,6 +144,50 @@ def verify_task(config_path: str, policy_ref: str) -> None:
     )
 
 
+@cli.command("lock-task")
+@click.argument("task_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--sign", is_flag=True, help="Also attest the lock with an ed25519 key (task owner).")
+@click.option(
+    "--key", "key_path", default=None, type=click.Path(exists=True), help="ed25519 private key PEM."
+)
+@click.option("--key-id", default="task-owner", help="Identifier recorded in the signature.")
+def lock_task(task_dir: str, sign: bool, key_path: str | None, key_id: str) -> None:
+    """Mint tasks/<id>/task.lock: sha256 of every judge file (+ optional ed25519 signature).
+
+    Run by the TASK OWNER. A policy contributor cannot re-mint a valid signed lock (no key), and
+    any edit to a judge file changes its digest -> verify-task fails (exit 4).
+    """
+    import json
+    import tomllib
+
+    from cybernetics.behavior_ci.taskkit.lock import TaskLock, compute_digests, sign_lock
+
+    d = Path(task_dir)
+    meta = tomllib.loads((d / "task.toml").read_text())
+    files = ["task.toml", meta.get("module", "task.py")]
+    grader = meta.get("grader_module", "grader_isaac.py")
+    if (d / grader).exists():
+        files.append(grader)
+    if "eval" in meta and (d / meta["eval"]).exists():
+        files.append(meta["eval"])
+    lock = TaskLock(
+        task_id=meta["task_id"],
+        task_version=str(meta.get("task_version", "1")),
+        grader_entrypoint=meta.get("grader_entrypoint", "behavior_ci_run_trial"),
+        digests=compute_digests(d, sorted(set(files))),
+    )
+    if sign:
+        if not key_path:
+            click.echo("--sign requires --key <ed25519 private key PEM>", err=True)
+            sys.exit(EXIT_INPUT)
+        lock = sign_lock(lock, Path(key_path).read_bytes(), key_id)
+    (d / meta.get("lock", "task.lock")).write_text(json.dumps(lock.to_dict(), indent=2) + "\n")
+    click.echo(
+        f"wrote {d / meta.get('lock', 'task.lock')}: {len(lock.digests)} files"
+        + (f", signed by {key_id}" if sign else "")
+    )
+
+
 @cli.command("render-comment")
 @click.option("--artifact-dir", required=True, type=click.Path(exists=True))
 @click.option(
