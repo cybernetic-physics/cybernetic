@@ -324,40 +324,16 @@ class IsaacSessionAdapter:
         observation: Dict[str, Any],
         scenario: Dict[str, Any],
     ) -> TrialObservation:
-        """Pinned-task path: upload the PACK grader (done at prepare()) and run it on the
-        policy-emitted trajectory + task-owned observation. The grader's entrypoint is FIXED
-        by the task (no policy-chosen session_entrypoint)."""
-        entrypoint = self.task.grader_entrypoint if self.task else "behavior_ci_run_trial"
-        payload = {
-            "entrypoint": entrypoint,
-            "action": action,
-            "observation": observation,
-            "run": run,
-            "scenario": scenario,
-            "camera": self.cfg.camera,
-        }
-        out = self._mcp(
-            "isaac.execute_script",
-            {"code": _trial_script(self.module_name, entrypoint, payload)},
-        )
-        result = _parse_result(out)
-        metrics = result.get("metrics")
-        if not isinstance(metrics, dict):
-            raise IsaacSessionError(f"trial {run}: grader returned no metrics: {result}")
-        events = [
-            Event(
-                run=run,
-                time_seconds=float(e.get("time_seconds", 0.0)),
-                code=str(e.get("code", "EVENT")),
-                message=str(e.get("message", "")),
-            )
-            for e in result.get("events", [])
-        ]
+        """Pinned-task path: the verdict is the task's PURE measure() of the emitted trajectory
+        (identical to the offline fixture, so the two cannot drift), computed here without a
+        per-trial Isaac round-trip. The hosted session is used only to render the replay video
+        (see ``capture_replays``)."""
+        metrics = self.task.measure(action, observation)
         return TrialObservation(
             run=run,
             metrics={k: v for k, v in metrics.items()},
-            events=events,
-            trajectory_id=str(result.get("trajectory_id", f"g1-run{run:02d}")),
+            events=[],
+            trajectory_id=f"g1-run{run:02d}",
         )
 
     def capture_replays(
