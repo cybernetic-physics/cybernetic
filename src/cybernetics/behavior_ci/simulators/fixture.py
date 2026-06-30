@@ -121,8 +121,13 @@ class FixtureSimulatorAdapter:
         )
 
     def capture_replays(
-        self, scene: SceneSpec, failed_run: Optional[int], passed_run: Optional[int]
+        self,
+        scene: SceneSpec,
+        failed_run: Optional[int],
+        passed_run: Optional[int],
+        replay_inputs: Optional[Dict[int, Dict[str, Any]]] = None,
     ) -> List[ReplayResult]:
+        # replay_inputs is hosted-only (re-arming the Isaac motion); the fixture has no scene.
         wanted: List[str] = []
         if failed_run is not None:
             wanted.append("replay-failed")

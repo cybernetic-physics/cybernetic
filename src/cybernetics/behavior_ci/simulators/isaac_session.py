@@ -361,7 +361,11 @@ class IsaacSessionAdapter:
         )
 
     def capture_replays(
-        self, scene: SceneSpec, failed_run: Optional[int], passed_run: Optional[int]
+        self,
+        scene: SceneSpec,
+        failed_run: Optional[int],
+        passed_run: Optional[int],
+        replay_inputs: Optional[Dict[int, Dict[str, Any]]] = None,
     ) -> List[ReplayResult]:
         wanted: List[tuple[str, Optional[int]]] = []
         if failed_run is not None:
@@ -374,9 +378,33 @@ class IsaacSessionAdapter:
         replays: List[ReplayResult] = []
         for name, _run in wanted:
             out_path = f"{_MEDIA_DIR}/{name}.mp4"
-            # The hosted isaac.capture_video records the current viewport from the
-            # named camera; it has no per-run replay parameter, so capture the
-            # settled scene as-is (the pass/fail camera frames the weld point).
+            # Re-arm the weld-approach motion just before capturing so the clip shows the arm
+            # MOVING (home -> weld pose over ~2-3 s of real time) rather than a settled still.
+            # The replay is purely visual; the verdict comes from the geometric measurement.
+            if (
+                replay_inputs is not None
+                and _run is not None
+                and _run in replay_inputs
+                and self.task is not None
+            ):
+                ri = replay_inputs[_run]
+                try:
+                    self._mcp(
+                        "isaac.execute_script",
+                        {
+                            "code": _trial_script(
+                                self.module_name,
+                                "behavior_ci_arm_replay",
+                                {
+                                    "action": ri["action"],
+                                    "observation": ri["observation"],
+                                    "camera": scene.camera,
+                                },
+                            )
+                        },
+                    )
+                except IsaacSessionError:
+                    pass  # best-effort cinematics; fall back to a still capture
             self._mcp(
                 "isaac.capture_video",
                 {
