@@ -94,6 +94,8 @@ class IsaacSessionAdapter:
         self.runtime_provider = runtime_provider
         self.session_id: Optional[str] = None
         self._rpc_id = 0
+        # Set by the runner for a pinned task: the platform-owned action/measure contract.
+        self.task = None
         self._owns_client = http_client is None
         if http_client is None:
             import httpx
@@ -313,6 +315,49 @@ class IsaacSessionAdapter:
             metrics={k: v for k, v in metrics.items()},
             events=events,
             trajectory_id=str(result.get("trajectory_id", f"{policy.policy_id}-run{run:02d}")),
+        )
+
+    def run_action_trial(
+        self,
+        action: Dict[str, Any],
+        run: int,
+        observation: Dict[str, Any],
+        scenario: Dict[str, Any],
+    ) -> TrialObservation:
+        """Pinned-task path: upload the PACK grader (done at prepare()) and run it on the
+        policy-emitted trajectory + task-owned observation. The grader's entrypoint is FIXED
+        by the task (no policy-chosen session_entrypoint)."""
+        entrypoint = self.task.grader_entrypoint if self.task else "behavior_ci_run_trial"
+        payload = {
+            "entrypoint": entrypoint,
+            "action": action,
+            "observation": observation,
+            "run": run,
+            "scenario": scenario,
+            "camera": self.cfg.camera,
+        }
+        out = self._mcp(
+            "isaac.execute_script",
+            {"code": _trial_script(self.module_name, entrypoint, payload)},
+        )
+        result = _parse_result(out)
+        metrics = result.get("metrics")
+        if not isinstance(metrics, dict):
+            raise IsaacSessionError(f"trial {run}: grader returned no metrics: {result}")
+        events = [
+            Event(
+                run=run,
+                time_seconds=float(e.get("time_seconds", 0.0)),
+                code=str(e.get("code", "EVENT")),
+                message=str(e.get("message", "")),
+            )
+            for e in result.get("events", [])
+        ]
+        return TrialObservation(
+            run=run,
+            metrics={k: v for k, v in metrics.items()},
+            events=events,
+            trajectory_id=str(result.get("trajectory_id", f"g1-run{run:02d}")),
         )
 
     def capture_replays(
