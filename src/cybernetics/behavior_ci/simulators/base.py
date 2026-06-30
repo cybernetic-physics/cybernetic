@@ -62,5 +62,9 @@ class SimulatorAdapter(Protocol):
     ) -> TrialObservation: ...
 
     def capture_replays(
-        self, scene: SceneSpec, failed_run: Optional[int], passed_run: Optional[int]
+        self,
+        scene: SceneSpec,
+        failed_run: Optional[int],
+        passed_run: Optional[int],
+        replay_inputs: Optional[Dict[int, Dict[str, Any]]] = None,
     ) -> List[ReplayResult]: ...

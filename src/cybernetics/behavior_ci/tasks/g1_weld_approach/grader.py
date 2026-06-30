@@ -293,9 +293,9 @@ def _place_point(stage, UsdGeom, Gf, path, pose_cm):
     x.AddTranslateOp().Set(Gf.Vec3d(*c))
 
 
-def _drive_arm(stage, UsdPhysics, okitapp, apex_cm, steps=150):
+def _set_arm(stage, UsdPhysics, apex_cm):
     # Map the lateral apex (cm) to a shoulder-roll detour + reach so larger detours visibly
-    # swing the arm wider. Bounded; this is for replay evidence, not the verdict.
+    # swing the arm wider. Sets the joint drive TARGETS only (no stepping).
     f = max(0.0, min(apex_cm / 80.0, 1.5))
     for joint, deg in (
         ("right_shoulder_pitch", -95 - 15 * f),
@@ -310,9 +310,54 @@ def _drive_arm(stage, UsdPhysics, okitapp, apex_cm, steps=150):
             prim, "angular"
         )
         drive.GetTargetPositionAttr().Set(float(deg))
+
+
+def _drive_arm(stage, UsdPhysics, okitapp, apex_cm, steps=150):
+    _set_arm(stage, UsdPhysics, apex_cm)
     app = okitapp.get_app()
     for _ in range(steps):
         app.update()
+
+
+def behavior_ci_arm_replay(args):
+    """Arm the weld-approach motion so the NEXT isaac.capture_video films the arm MOVING.
+
+    Resets to a home pose and settles there (this part is not filmed), then commands the
+    target pose and returns IMMEDIATELY — the joint drive then plays out over the next ~2-3 s
+    of real time, which is exactly the capture window, so the clip shows the approach in
+    motion instead of a settled still. Purely visual; the verdict is the geometric measure().
+    """
+    action = args.get("action") or {}
+    observation = args.get("observation") or {}
+    apex_cm = max((w[1] for w in action.get("waypoints", [[0, 0, 0]])), default=0.0)
+    try:
+        _, ousd, otimeline, okitapp, Gf, Usd, UsdGeom, UsdPhysics = _omni()
+        stage = ousd.get_context().get_stage()
+    except Exception:  # pragma: no cover - hosted only
+        return {"staged": False}
+    if observation.get("obstacle_box"):
+        _place_box(stage, UsdGeom, Gf, OBSTACLE, observation["obstacle_box"], color=(0.8, 0.2, 0.1))
+    if observation.get("restricted_zone"):
+        _place_box(
+            stage,
+            UsdGeom,
+            Gf,
+            ZONE,
+            observation["restricted_zone"],
+            color=(0.9, 0.1, 0.1),
+            opacity=0.35,
+        )
+    if observation.get("seam_pose"):
+        _place_point(stage, UsdGeom, Gf, SEAM, observation["seam_pose"])
+    otimeline.get_timeline_interface().play()
+    app = okitapp.get_app()
+    # 1) snap to HOME and settle (not filmed).
+    _set_arm(stage, UsdPhysics, 0.0)
+    for _ in range(40):
+        app.update()
+    # 2) command the target and return now; the drive unfolds during the capture window.
+    _set_arm(stage, UsdPhysics, apex_cm)
+    return {"staged": True}
 
 
 def _world_pos(stage, UsdGeom, Usd, Gf, path):

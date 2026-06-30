@@ -113,10 +113,14 @@ class BehaviorCiRunner:
         with adapter:
             adapter.prepare(scene)
             trials: List[TrialResult] = []
+            # Per-run (action, observation) so the hosted adapter can re-arm the weld-approach
+            # motion and film it MOVING during capture (rather than a settled still).
+            replay_inputs: Dict[int, Dict[str, Any]] = {}
             for run, scenario in enumerate(trial_scenarios):
                 if task is not None:
                     observation = task.build_observation(scenario)
                     action = task.plan(policy.controller, observation)
+                    replay_inputs[run] = {"action": action, "observation": observation}
                     obs = adapter.run_action_trial(action, run, observation, scenario)
                 else:
                     obs = adapter.run_trial(policy, run, scenario)
@@ -125,7 +129,9 @@ class BehaviorCiRunner:
             status, summary, metrics, failures, checks = aggregate(trials, spec)
             failed_run = next((t.run for t in trials if not t.passed), None)
             passed_run = next((t.run for t in trials if t.passed), None)
-            replays = adapter.capture_replays(scene, failed_run, passed_run)
+            replays = adapter.capture_replays(
+                scene, failed_run, passed_run, replay_inputs=replay_inputs
+            )
             replay_source = adapter.replay_source
             session_id = adapter.session_id
 
