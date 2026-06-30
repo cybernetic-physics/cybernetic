@@ -24,5 +24,5 @@ class ScriptedPolicyBackend:
             policy_id=manifest.policy_id,
             backend_id=self.backend_id,
             real_vla=False,
-            controller=dict(manifest.controller),
+            controller=dict(manifest.params),
         )
