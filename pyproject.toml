@@ -49,8 +49,10 @@ Documentation = "https://github.com/cybernetic-physics/cybernetic#readme"
 tokenizers = ["transformers"]
 aiohttp = ["aiohttp", "httpx_aiohttp>=0.1.8"]
 torch = ["torch"]
-# behavior-ci reads YAML config/eval files; PyYAML stays out of the core diet.
-behavior-ci = ["pyyaml>=6"]
+# behavior-ci reads YAML config/eval files; PyYAML stays out of the core diet. imageio-ffmpeg
+# ships a static ffmpeg so the hosted replay mp4 can be transcoded to an inline PR-comment GIF
+# without a system ffmpeg on the runner.
+behavior-ci = ["pyyaml>=6", "imageio-ffmpeg>=0.5"]
 all = ["cybernetic-physics[tokenizers,aiohttp,torch,behavior-ci]"]
 
 [tool.uv]

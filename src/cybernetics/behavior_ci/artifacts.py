@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from . import renderers
+from . import media, renderers
 from .schemas import (
     METRICS_SCHEMA_VERSION,
     BehaviorCiResult,
@@ -51,15 +51,30 @@ def write_bundle(
     (bundle_dir / "report").mkdir(parents=True, exist_ok=True)
     (bundle_dir / "replays").mkdir(parents=True, exist_ok=True)
 
-    # 1) replays first, so result.artifacts is populated before rendering.
+    # 1) replays first, so result.artifacts is populated before rendering. For each mp4 also
+    # write a best-effort inline GIF (real Isaac captures only; a failed/placeholder transcode
+    # is swallowed so the authoritative mp4 bundle stays valid).
     for r in replays:
         rel = f"replays/{r.name}.mp4"
         (bundle_dir / rel).write_bytes(r.data)
         result.artifacts[r.name.replace("-", "_")] = rel
+        try:
+            gif = media.mp4_to_gif(r.data)
+        except Exception:  # noqa: BLE001 - best effort; never break the bundle on transcode
+            gif = None
+        if gif:
+            grel = f"replays/{r.name}.gif"
+            (bundle_dir / grel).write_bytes(gif)
+            result.artifacts[r.name.replace("-", "_") + "_gif"] = grel
     if "replay_failed" in result.artifacts:
         result.artifacts["replay_video"] = result.artifacts["replay_failed"]
     elif "replay_passed" in result.artifacts:
         result.artifacts["replay_video"] = result.artifacts["replay_passed"]
+    # Preferred inline replay GIF: the failed clip on a regression, else the passed clip.
+    if "replay_failed_gif" in result.artifacts:
+        result.artifacts["replay_gif"] = result.artifacts["replay_failed_gif"]
+    elif "replay_passed_gif" in result.artifacts:
+        result.artifacts["replay_gif"] = result.artifacts["replay_passed_gif"]
 
     # 2) link the rest.
     result.artifacts.update(
@@ -98,6 +113,11 @@ def validate_bundle(bundle_dir: Path, result: BehaviorCiResult | None = None) ->
     for clip in replays:
         if not looks_like_mp4(clip.read_bytes()):
             problems.append(f"replay is not a valid MP4: replays/{clip.name}")
+    # GIFs are optional (inline-comment convenience, not the authoritative contract), but any
+    # present must be a real GIF.
+    for gif in sorted((bundle_dir / "replays").glob("*.gif")):
+        if not media.looks_like_gif(gif.read_bytes()):
+            problems.append(f"replay GIF is not a valid GIF: replays/{gif.name}")
 
     if result is not None:
         if result.status == "failed" and not (bundle_dir / "replays/replay-failed.mp4").exists():

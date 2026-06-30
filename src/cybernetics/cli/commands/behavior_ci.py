@@ -145,11 +145,35 @@ def verify_task(config_path: str, policy_ref: str) -> None:
 
 @cli.command("render-comment")
 @click.option("--artifact-dir", required=True, type=click.Path(exists=True))
-def render_comment(artifact_dir: str) -> None:
-    """Print the PR comment markdown from a produced artifact bundle."""
+@click.option(
+    "--replay-gif-url",
+    default="",
+    help="Inline-capable URL of the published replay GIF; substituted into the replay slot.",
+)
+def render_comment(artifact_dir: str, replay_gif_url: str) -> None:
+    """Print the PR comment markdown from a produced artifact bundle.
 
-    comment = Path(artifact_dir) / "comment.md"
+    With --replay-gif-url, the replay placeholder is replaced by an inline GIF image block;
+    without it, by a 'preview unavailable' note (so the comment always posts cleanly).
+    """
+    import json
+
+    from cybernetics.behavior_ci import renderers
+
+    d = Path(artifact_dir)
+    comment = d / "comment.md"
     if not comment.exists():
         click.echo(f"no comment.md in {artifact_dir}", err=True)
         sys.exit(EXIT_CONTRACT)
-    click.echo(comment.read_text(), nl=False)
+    body = comment.read_text()
+    commit = camera = ""
+    try:
+        result = json.loads((d / "result.json").read_text())
+        commit, camera = result.get("commit", ""), result.get("camera", "")
+    except (OSError, ValueError):
+        pass
+    if replay_gif_url:
+        slot = renderers.replay_image_block(replay_gif_url, commit, camera)
+    else:
+        slot = "_Replay preview unavailable — see the artifact bundle for the mp4 clip._"
+    click.echo(body.replace(renderers.REPLAY_TOKEN, slot), nl=False)
