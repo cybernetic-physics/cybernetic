@@ -444,6 +444,13 @@ class HonestyProvenance:
     artifact_contract_version: str = RESULT_SCHEMA_VERSION
     session_id: Optional[str] = None
     notes: str = ""
+    # Pinned Task Pack provenance: which platform-owned judge graded this, and that its
+    # content pins were verified. Present only on the pinned (v2) path.
+    task_id: Optional[str] = None
+    task_version: Optional[str] = None
+    eval_sha256: Optional[str] = None
+    grader_sha256: Optional[str] = None
+    pins_verified: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

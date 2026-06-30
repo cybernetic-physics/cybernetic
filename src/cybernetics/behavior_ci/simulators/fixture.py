@@ -54,6 +54,8 @@ class FixtureSimulatorAdapter:
         self.allow_placeholder_replays = allow_placeholder_replays
         self.session_id: Optional[str] = None
         self.replay_source = "none"
+        # Set by the runner for a pinned task: the platform-owned action/measure contract.
+        self.task = None
 
     def __enter__(self) -> "FixtureSimulatorAdapter":
         return self
@@ -64,6 +66,27 @@ class FixtureSimulatorAdapter:
     def prepare(self, scene: SceneSpec) -> None:
         # No-op: the fixture model has no scene to instantiate.
         return None
+
+    def run_action_trial(
+        self,
+        action: Dict[str, Any],
+        run: int,
+        observation: Dict[str, Any],
+        scenario: Dict[str, Any],
+    ) -> TrialObservation:
+        """Pinned-task path: the policy emitted ``action`` (a trajectory); the task's pure,
+        independent ``measure`` derives the metrics from the geometry. No policy-supplied
+        number is read as ground truth, and the same ``measure`` runs in the hosted grader,
+        so the offline and hosted verdicts cannot drift."""
+        if self.task is None:  # pragma: no cover - guarded by the runner
+            raise ConfigError("run_action_trial requires a pinned task")
+        metrics = self.task.measure(action, observation)
+        return TrialObservation(
+            run=run,
+            metrics={k: v for k, v in metrics.items()},
+            events=[],
+            trajectory_id=f"g1-run{run:02d}",
+        )
 
     def run_trial(
         self, policy: LoadedPolicy, run: int, scenario: Dict[str, Any]
