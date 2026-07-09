@@ -2,7 +2,8 @@
 
 `cybernetic-physics` is the Python client for the hosted Cybernetics platform —
 a Tinker-like API for rollout, sampling, and LoRA training on platform-managed
-GPU compute leases.
+GPU compute leases, plus robotics and simulation-asset helpers for hosted robot
+workflows.
 
 ```bash
 pip install cybernetic-physics      # distribution name; the import package is `cybernetics`
@@ -70,6 +71,104 @@ cybernetics --format json doctor
 `--require-rl` exits nonzero unless the backend advertises the requested
 DreamZero RL loss family (`flow_rwr` by default). This keeps SFT-only
 deployments usable while making RL readiness explicit in CI and runbooks.
+
+## Simulation assets
+
+The SDK includes an MVP `sim` namespace for packaging local simulation assets as
+Cybernetics environments, launching hosted Isaac preview sessions, and producing
+asset references that can be reused by RobotTask specs.
+
+```bash
+cybernetics sim inspect ./scene-folder --format json
+cybernetics sim import ./scene.usdz --name warehouse-demo
+cybernetics sim import ./robot.urdf --bundle-path robot.bundle.zip --source-url https://example.test/robot
+cybernetics sim launch cybernetics://envs/env_.../versions/ver_... --wait
+cybernetics sim render ./scene-folder --root-stage scene.usd --wait --out preview.jpg
+```
+
+The top-level `cybernetics.Client` is a composition root. Product namespaces
+attach under it, so simulation helpers live at `client.sim` without making
+`cybernetics.sim` own the package root.
+
+```python
+import cybernetics
+
+with cybernetics.Client() as client:
+    imported = client.sim.import_asset("./scene-folder", name="warehouse-demo")
+    sim_asset_ref = imported.to_asset_ref().to_dict()
+
+    preview = client.sim.render(imported, wait=True, out="preview.jpg")
+    print(sim_asset_ref["uri"])
+    print(preview.preview_url)
+    print(preview.launch_url)
+```
+
+`cybernetics.sim` owns asset packaging, import, preview, render, catalog, and
+launch helpers. `cybernetics.robotics` owns `RobotTaskSpec`, backend adapters,
+run records, policy artifacts, replay artifacts, datasets, and evaluation
+records. The two compose through plain serialized asset references:
+`client.sim.import_asset(...).to_asset_ref().to_dict()` can be placed in
+`RobotTaskSpec.asset_refs[]` without making robotics import the sim namespace.
+
+`SimImportResult.to_asset_ref()` returns a `simulation-asset-ref/v1` descriptor:
+
+```python
+{
+    "schema_version": "simulation-asset-ref/v1",
+    "ref_kind": "environment_version",  # or "local_bundle" / "catalog_asset"
+    "uri": "cybernetics://envs/env_.../versions/ver_...",
+    "env_id": "env_...",
+    "version_id": "ver_...",
+    "root_stage_relpath": "scene.usd",
+    "asset_kind": "usd_stage",
+    "compatibility_status": "ready_to_render",
+    "content_sha256": "...",
+    "metadata": {},
+}
+```
+
+RobotTask code consumes that value as an opaque descriptor:
+
+```python
+from cybernetics.robotics import RobotTaskSpec
+
+task_payload = build_robot_task_payload(...)
+task_payload["asset_refs"] = [sim_asset_ref]
+task = RobotTaskSpec.from_dict(task_payload)
+```
+
+The current MVP renders USD-family assets (`.usd`, `.usda`, `.usdc`, `.usdz`)
+by creating an environment version and starting a hosted session. URDF, Xacro,
+SDF, and MJCF files are detected and packaged as `needs_conversion` until the
+converter path lands. Public `/sim/<slug>` artifact pages are also future work;
+`cybernetics sim render --public` fails explicitly instead of pretending to
+publish a durable public artifact.
+
+Uploaded bundle manifests intentionally avoid host-local absolute source paths.
+They keep safe provenance only: source basename, optional user-supplied
+`--source-url`, root stage, asset kind, compatibility status, and per-file
+hashes/sizes.
+
+`cybernetics sim render` is preview/evidence plumbing. It answers whether an
+asset can be imported, launched, and visually inspected. Robot task success,
+policy evaluation, rollout records, replay evidence, datasets, and VLA/eval
+records remain owned by `cybernetics.robotics`.
+
+## RobotTask SDK contracts
+
+`cybernetics.robotics` provides dependency-light contracts and helper adapters
+for robot workflows:
+
+- `RobotTaskSpec` for task definitions and simulator backend configuration
+- `RobotEnv` / `StepResult` for backend adapter shape
+- `RobotRunRecord` for rollout records
+- `PolicyArtifact` for policy/checkpoint metadata
+- `TrajectoryDatasetArtifact`, replay helpers, VLA eval records, world-model
+  artifact metadata, and provider templates such as Unitree G1
+
+The base robotics package is designed to import without sim, Isaac, ROS2,
+MuJoCo, Worldlines, or Cosmos runtime packages installed. Heavy backend
+execution belongs behind backend adapters, not in the package import path.
 
 ## DreamZero examples
 
