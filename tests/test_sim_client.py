@@ -185,6 +185,30 @@ def test_launch_environment_ref_without_version_omits_null_base_version() -> Non
     assert "baseVersionId" not in request_body
 
 
+@respx.mock
+def test_wait_for_session_accepts_public_session_readiness_shape() -> None:
+    respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sessionId": "sess_demo",
+                "status": "running",
+                "runtimeStatus": "running",
+                "access": {"viewerUrl": "https://viewer.test/sess_demo"},
+            },
+        )
+    )
+
+    with SimulationClient() as client:
+        session = client.wait_for_session(
+            "sess_demo",
+            timeout_seconds=0.1,
+            poll_interval_seconds=0.01,
+        )
+
+    assert session["sessionId"] == "sess_demo"
+
+
 def test_render_public_flag_is_explicitly_not_mvp(tmp_path) -> None:
     (tmp_path / "scene.usd").write_text("#usda 1.0\n")
 

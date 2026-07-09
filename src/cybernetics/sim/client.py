@@ -479,7 +479,7 @@ class SimulationClient:
             status = str(session.get("status", "")).lower()
             if status in _TERMINAL_STATUSES:
                 raise SimulationError(f"session {session_id} entered terminal status {status!r}")
-            if status in _READY_STATUSES and _bridge_ready(session):
+            if status in _READY_STATUSES and _session_preview_ready(session):
                 return session
             last = f"status={status or 'unknown'}"
             if time.monotonic() >= deadline:
@@ -687,6 +687,14 @@ def _bridge_ready(session: dict[str, Any]) -> bool:
         return True
     bridge = session.get("bridge_status") or session.get("bridgeStatus") or {}
     return isinstance(bridge, dict) and bridge.get("isaac_extension_ready") is True
+
+
+def _session_preview_ready(session: dict[str, Any]) -> bool:
+    if _bridge_ready(session):
+        return True
+    if session.get("runtimeStatus") == "running":
+        return True
+    return _viewer_url(session) is not None
 
 
 def _neko_http_base(neko_url: str) -> str:
