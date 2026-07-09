@@ -31,6 +31,12 @@ from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
 from .locomujoco import LocoMuJoCoRobotEnv
 from .runner import default_action, deterministic_run_id, run_robot_episode
+from .vla_eval import (
+    VLA_EVAL_RECORD_SCHEMA_VERSION,
+    VlaEvalRunRecord,
+    build_vla_eval_request,
+    create_vla_eval_record,
+)
 from .worldlines import (
     WorldlinesAdapterError,
     WorldlinesModelPlaneAdapter,
@@ -44,6 +50,7 @@ __all__ = [
     "ROBOT_POLICY_SCHEMA_VERSION",
     "ROBOT_RUN_SCHEMA_VERSION",
     "ROBOT_TASK_SCHEMA_VERSION",
+    "VLA_EVAL_RECORD_SCHEMA_VERSION",
     "WORLD_MODEL_SCHEMA_VERSION",
     "FixtureRobotEnv",
     "LocoMuJoCoRobotEnv",
@@ -54,11 +61,14 @@ __all__ = [
     "RobotTaskSpec",
     "StepResult",
     "TrajectoryDatasetArtifact",
+    "VlaEvalRunRecord",
     "WorldModelArtifact",
     "WorldlinesAdapterError",
     "WorldlinesModelPlaneAdapter",
     "WorldlinesTrainingConfig",
+    "build_vla_eval_request",
     "build_worldlines_training_payload",
+    "create_vla_eval_record",
     "default_action",
     "create_trajectory_dataset_from_runs",
     "deterministic_run_id",

@@ -89,6 +89,28 @@ def _positive_int(value: Any, where: str) -> int:
     return result
 
 
+def _action_chunking(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    chunking = _as_dict(value, "policy artifact action_chunking")
+    chunk_steps = _positive_int(
+        _require(chunking, "chunk_steps", "policy artifact action_chunking"),
+        "policy artifact action_chunking.chunk_steps",
+    )
+    stride_steps = _positive_int(
+        _require(chunking, "stride_steps", "policy artifact action_chunking"),
+        "policy artifact action_chunking.stride_steps",
+    )
+    if stride_steps > chunk_steps:
+        raise RobotContractError(
+            "policy artifact action_chunking.stride_steps must be <= chunk_steps"
+        )
+    result = dict(chunking)
+    result["chunk_steps"] = chunk_steps
+    result["stride_steps"] = stride_steps
+    return result
+
+
 def _check_control_dt(sim_dt: float, control_dt: float) -> None:
     ratio = control_dt / sim_dt
     if not math.isclose(ratio, round(ratio), rel_tol=1e-9, abs_tol=1e-9):
@@ -178,6 +200,7 @@ class PolicyArtifact:
     inference_runtime: Optional[str] = None
     control_dt: Optional[float] = None
     latency_budget_ms: Optional[int] = None
+    action_chunking: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "PolicyArtifact":
@@ -192,6 +215,7 @@ class PolicyArtifact:
         backend = str(_require(data, "simulator_backend", "policy artifact"))
         _check_choice(backend, SIMULATOR_BACKENDS, "policy artifact simulator_backend")
         control_dt = data.get("control_dt")
+        latency_budget_ms = data.get("latency_budget_ms")
         return cls(
             schema_version=str(data["schema_version"]),
             artifact_id=str(_require(data, "artifact_id", "policy artifact")),
@@ -209,8 +233,15 @@ class PolicyArtifact:
             created_by_run_id=str(_require(data, "created_by_run_id", "policy artifact")),
             policy_kind=policy_kind,
             inference_runtime=data.get("inference_runtime"),
-            control_dt=float(control_dt) if control_dt is not None else None,
-            latency_budget_ms=int(data["latency_budget_ms"]) if data.get("latency_budget_ms") is not None else None,
+            control_dt=_positive_float(control_dt, "policy artifact control_dt")
+            if control_dt is not None
+            else None,
+            latency_budget_ms=_positive_int(
+                latency_budget_ms, "policy artifact latency_budget_ms"
+            )
+            if latency_budget_ms is not None
+            else None,
+            action_chunking=_action_chunking(data.get("action_chunking")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
