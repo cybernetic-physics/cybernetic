@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from cybernetics.lib.credentials import resolve_api_key, resolve_base_url
 
@@ -445,12 +445,20 @@ class SimulationClient:
         preview_url: str | None = None
         preview_path: Path | None = None
         status = "session_started"
-        if wait:
-            preview_url = self.preview_url(launch.session_id)
-            status = "preview_ready"
-            if out is not None:
-                preview_path = Path(out).expanduser().resolve()
-                self.download_preview(launch.session_id, preview_path)
+        try:
+            if wait:
+                preview_url = self.preview_url(launch.session_id)
+                status = "preview_ready"
+                if out is not None:
+                    preview_path = Path(out).expanduser().resolve()
+                    self.download_preview(launch.session_id, preview_path)
+        except Exception:
+            if wait and not keep_session:
+                try:
+                    self.stop_session(launch.session_id)
+                except SimulationError:
+                    pass
+            raise
 
         if wait and not keep_session:
             self.stop_session(launch.session_id)
@@ -494,7 +502,9 @@ class SimulationClient:
         )
         neko_url = _require_str(grant, "neko_url")
         http_base = _neko_http_base(neko_url)
-        return f"{http_base}/api/shot.jpg?quality={quality}"
+        login_token = self._neko_login_token(http_base, grant)
+        query = urlencode({"quality": str(quality), "token": login_token})
+        return f"{http_base}/api/shot.jpg?{query}"
 
     def download_preview(
         self,
@@ -506,7 +516,7 @@ class SimulationClient:
     ) -> Path:
         url = self.preview_url(session_id, ttl_seconds=ttl_seconds, quality=quality)
         response = self._client.get(url)
-        _raise_for_response(response, f"GET {url}")
+        _raise_for_response(response, "GET CUA preview image")
         path = Path(destination).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(response.content)
@@ -514,6 +524,20 @@ class SimulationClient:
 
     def stop_session(self, session_id: str) -> None:
         self._request("POST", f"/v1/sessions/{session_id}/stop", json_body={})
+
+    def _neko_login_token(self, http_base: str, grant: dict[str, Any]) -> str:
+        response = self._client.post(
+            f"{http_base}/api/login",
+            json={
+                "username": _require_str(grant, "neko_username"),
+                "password": _require_str(grant, "neko_password"),
+            },
+        )
+        _raise_for_response(response, "POST CUA Neko login")
+        body = response.json()
+        if not isinstance(body, dict):
+            raise SimulationError("CUA Neko login returned a non-object JSON response")
+        return _require_str(body, "token")
 
     def _coerce_import_result(
         self,
