@@ -29,7 +29,7 @@ from .contracts import (
 from .datasets import create_trajectory_dataset_from_runs
 from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
-from .locomujoco import LocoMuJoCoRobotEnv
+from .locomujoco import GymnasiumRobotEnvAdapter, LocoMuJoCoRobotEnv, RobotBackendError
 from .replay import (
     ReplayImportRequest,
     build_replay_import_request,
@@ -63,10 +63,12 @@ __all__ = [
     "VLA_EVAL_RECORD_SCHEMA_VERSION",
     "WORLD_MODEL_SCHEMA_VERSION",
     "FixtureRobotEnv",
+    "GymnasiumRobotEnvAdapter",
     "LocoMuJoCoRobotEnv",
     "PolicyArtifact",
     "ReplayImportRequest",
     "RobotContractError",
+    "RobotBackendError",
     "RobotEnv",
     "RobotRunRecord",
     "RobotTaskRunResult",
