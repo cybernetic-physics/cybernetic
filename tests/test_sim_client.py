@@ -277,16 +277,113 @@ def test_render_wait_keeps_session_running_by_default(tmp_path) -> None:
     respx.post(f"{BASE}/v1/sessions/sess_demo/cua-grant").mock(
         return_value=httpx.Response(
             200,
-            json={"neko_url": "wss://neko.test/token"},
+            json={
+                "neko_url": "wss://neko.test/token",
+                "neko_username": "neko",
+                "neko_password": "secret",
+            },
         )
+    )
+    respx.post("https://neko.test/token/api/login").mock(
+        return_value=httpx.Response(200, json={"token": "login_demo"})
     )
     with SimulationClient() as client:
         result = client.render(tmp_path, name="sim-demo", wait=True)
 
     assert result.status == "preview_ready"
-    assert result.preview_url == "https://neko.test/token/api/shot.jpg?quality=90"
+    assert result.preview_url == "https://neko.test/token/api/shot.jpg?quality=90&token=login_demo"
     assert result.launch_url == "https://viewer.test/sess_demo"
     assert all(call.request.url.path != "/v1/sessions/sess_demo/stop" for call in respx.calls)
+
+
+@respx.mock
+def test_render_stops_session_when_preview_download_fails(tmp_path) -> None:
+    (tmp_path / "scene.usd").write_text("#usda 1.0\n")
+
+    respx.post(f"{BASE}/v1/envs").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "env_demo",
+                "name": "sim-demo",
+                "workspaceId": "ws_1",
+                "createdAt": "2026-07-09T00:00:00Z",
+                "updatedAt": "2026-07-09T00:00:00Z",
+            },
+        )
+    )
+    respx.post(f"{BASE}/v1/envs/env_demo/versions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "version": {"id": "ver_demo", "envId": "env_demo", "status": "uploading"},
+                "upload": {
+                    "url": "https://s3.test/upload",
+                    "fields": {"key": "envs/env_demo/versions/ver_demo/bundle.zip"},
+                    "key": "envs/env_demo/versions/ver_demo/bundle.zip",
+                    "expiresAt": "2026-07-09T01:00:00Z",
+                    "putUrl": "https://s3.test/upload",
+                },
+            },
+        )
+    )
+    respx.post("https://s3.test/upload").mock(return_value=httpx.Response(204))
+    respx.post(f"{BASE}/v1/envs/env_demo/versions/ver_demo/finalize").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "ver_demo",
+                "envId": "env_demo",
+                "status": "ready",
+                "rootStageRelpath": "scene.usd",
+            },
+        )
+    )
+    respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(200, json={"sessionId": "sess_demo", "status": "starting"})
+    )
+    respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sessionId": "sess_demo",
+                "status": "running",
+                "runtimeStatus": "running",
+                "access": {"viewerUrl": "https://viewer.test/sess_demo"},
+            },
+        )
+    )
+    respx.post(f"{BASE}/v1/sessions/sess_demo/cua-grant").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "neko_url": "wss://neko.test/token",
+                "neko_username": "neko",
+                "neko_password": "secret",
+            },
+        )
+    )
+    respx.post("https://neko.test/token/api/login").mock(
+        return_value=httpx.Response(200, json={"token": "login_demo"})
+    )
+    respx.get("https://neko.test/token/api/shot.jpg").mock(
+        return_value=httpx.Response(401, json={"message": "unauthorized"})
+    )
+    stop_route = respx.post(f"{BASE}/v1/sessions/sess_demo/stop").mock(
+        return_value=httpx.Response(204)
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(SimulationError, match="GET CUA preview image"):
+            client.render(
+                tmp_path,
+                name="sim-demo",
+                wait=True,
+                keep_session=False,
+                out=tmp_path / "preview.jpg",
+            )
+
+    assert stop_route.called
 
 
 def test_top_level_client_exposes_sim_namespace() -> None:
