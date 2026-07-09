@@ -170,6 +170,38 @@ The base robotics package is designed to import without sim, Isaac, ROS2,
 MuJoCo, Worldlines, or Cosmos runtime packages installed. Heavy backend
 execution belongs behind backend adapters, not in the package import path.
 
+## Robot tasks
+
+The `robotics` namespace defines the RobotTask contract, and
+`cybernetics.Client().robot_tasks` provides the first ergonomic SDK facade for
+loading, validating, locally smoke-testing, and writing task/policy artifacts.
+
+```python
+import cybernetics
+
+client = cybernetics.Client()
+
+task = client.robot_tasks.load("robot-task.json")
+run = client.robot_tasks.run_fixture(task, "artifacts/fixture-run", seed=42)
+
+policy = client.robot_tasks.policy_artifact(
+    task,
+    artifact_id="pol_fixture",
+    created_by_run_id=run.run_record.run_id,
+    checkpoint_uri="worldlines://fixture/checkpoints/latest",
+    policy_format="worldlines",
+    eval_metrics={"success_rate": 1.0},
+    rollout_artifacts=[str(run.rollout_path)],
+)
+client.robot_tasks.write_policy_artifact(policy, "artifacts/policy.json")
+```
+
+This facade is intentionally dependency-light. It validates serialized
+`RobotTaskSpec` dictionaries, writes stable JSON artifacts, and runs the fixture
+environment path without importing MuJoCo, Isaac, ROS2, Unitree, Worldlines, or
+Cosmos runtime packages. Hosted training, LocoMuJoCo adapters, and Isaac/Neko
+replay can build behind the same task/run/policy artifact boundary.
+
 ## DreamZero examples
 
 The repository ships an SDK-native DreamZero SFT smoke at

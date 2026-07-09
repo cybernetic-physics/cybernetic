@@ -96,11 +96,12 @@ def test_composed_sdk_exposes_sim_and_robotics_without_namespace_conflict() -> N
     result = _run_import_probe(
         """
         from cybernetics import Client
-        from cybernetics.robotics import RobotTaskSpec
+        from cybernetics.robotics import RobotTaskSpec, RobotTasksClient
         from cybernetics.sim import SimulationClient
 
         client = Client(api_key="cp_live_test", base_url="https://api.test")
         assert isinstance(client.sim, SimulationClient)
+        assert isinstance(client.robot_tasks, RobotTasksClient)
         assert RobotTaskSpec.__name__ == "RobotTaskSpec"
         client.close()
         """

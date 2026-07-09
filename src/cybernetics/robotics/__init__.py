@@ -36,6 +36,7 @@ from .replay import (
     validate_policy_for_replay,
 )
 from .runner import default_action, deterministic_run_id, run_robot_episode
+from .task_client import RobotTaskRunResult, RobotTasksClient
 from .vla_eval import (
     VLA_EVAL_RECORD_SCHEMA_VERSION,
     VlaEvalRunRecord,
@@ -68,7 +69,9 @@ __all__ = [
     "RobotContractError",
     "RobotEnv",
     "RobotRunRecord",
+    "RobotTaskRunResult",
     "RobotTaskSpec",
+    "RobotTasksClient",
     "StepResult",
     "TrajectoryDatasetArtifact",
     "VlaEvalRunRecord",
