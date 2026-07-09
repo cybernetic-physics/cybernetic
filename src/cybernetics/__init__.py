@@ -28,6 +28,7 @@ from ._response import APIResponse as APIResponse
 from ._response import AsyncAPIResponse as AsyncAPIResponse
 from ._utils._logs import setup_logging as _setup_logging
 from ._version import __title__, __version__
+from .client import Client
 from .lib.public_interfaces import APIFuture, SamplingClient, ServiceClient, TrainingClient
 
 # The generated SDK is async-first; keep the conventional top-level client name
@@ -67,6 +68,7 @@ __all__ = [
     "APIFuture",
     "AsyncCybernetics",
     "Cybernetics",
+    "Client",
     # Commonly used types
     "AdamParams",
     "Checkpoint",
