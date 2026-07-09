@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contracts import PolicyArtifact, RobotRunRecord
+from .contracts import PolicyArtifact, RobotRunRecord, TrajectoryDatasetArtifact
 
 
 def write_json_artifact(path: str | Path, payload: Mapping[str, Any]) -> Path:
@@ -26,4 +26,10 @@ def write_robot_run_record(path: str | Path, record: RobotRunRecord) -> Path:
 
 
 def write_policy_artifact(path: str | Path, artifact: PolicyArtifact) -> Path:
+    return write_json_artifact(path, artifact.to_dict())
+
+
+def write_trajectory_dataset_artifact(
+    path: str | Path, artifact: TrajectoryDatasetArtifact
+) -> Path:
     return write_json_artifact(path, artifact.to_dict())

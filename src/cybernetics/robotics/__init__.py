@@ -6,7 +6,12 @@ cybernetics.robotics`` works without MuJoCo, LocoMuJoCo, Isaac, ROS2, or
 Worldlines installed.
 """
 
-from .artifacts import write_json_artifact, write_policy_artifact, write_robot_run_record
+from .artifacts import (
+    write_json_artifact,
+    write_policy_artifact,
+    write_robot_run_record,
+    write_trajectory_dataset_artifact,
+)
 from .contracts import (
     ROBOT_DATASET_SCHEMA_VERSION,
     ROBOT_POLICY_SCHEMA_VERSION,
@@ -21,6 +26,7 @@ from .contracts import (
     WorldModelArtifact,
     stable_hash,
 )
+from .datasets import create_trajectory_dataset_from_runs
 from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
 from .locomujoco import LocoMuJoCoRobotEnv
@@ -43,10 +49,12 @@ __all__ = [
     "TrajectoryDatasetArtifact",
     "WorldModelArtifact",
     "default_action",
+    "create_trajectory_dataset_from_runs",
     "deterministic_run_id",
     "run_robot_episode",
     "stable_hash",
     "write_json_artifact",
     "write_policy_artifact",
     "write_robot_run_record",
+    "write_trajectory_dataset_artifact",
 ]

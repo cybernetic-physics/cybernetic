@@ -50,9 +50,10 @@ def run_robot_episode(
     try:
         observation = env.reset(seed=seed, options=task_spec.reset_spec)
         for step_index in range(limit):
-            result: StepResult = env.step(action(observation))
+            action_payload = dict(action(observation))
+            result: StepResult = env.step(action_payload)
             total_reward += float(result.reward)
-            rollout.append({"step": step_index, **result.to_dict()})
+            rollout.append({"step": step_index, "action": action_payload, **result.to_dict()})
             observation = result.observation
             if result.terminated:
                 status = "succeeded"

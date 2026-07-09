@@ -72,5 +72,9 @@ class FixtureRobotEnv:
     def close(self) -> None:
         self._closed = True
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def _observation(self) -> Mapping[str, Any]:
         return {"position": self._position, "step_count": self._step_count}

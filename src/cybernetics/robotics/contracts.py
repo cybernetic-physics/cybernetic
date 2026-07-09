@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
 ROBOT_TASK_SCHEMA_VERSION = "robot-task/v1"
@@ -68,8 +68,22 @@ def _check_choice(value: str, allowed: tuple[str, ...], where: str) -> None:
         raise RobotContractError(f"{where}: must be one of {list(allowed)}, got {value!r}")
 
 
+def _non_empty_str(value: Any, where: str) -> str:
+    result = str(value)
+    if not result:
+        raise RobotContractError(f"{where}: must be non-empty")
+    return result
+
+
 def _positive_float(value: Any, where: str) -> float:
     result = float(value)
+    if result <= 0:
+        raise RobotContractError(f"{where}: must be positive, got {result!r}")
+    return result
+
+
+def _positive_int(value: Any, where: str) -> int:
+    result = int(value)
     if result <= 0:
         raise RobotContractError(f"{where}: must be positive, got {result!r}")
     return result
@@ -250,6 +264,7 @@ class TrajectoryDatasetArtifact:
     schema_version: str
     artifact_id: str
     task_spec_uri: str
+    task_spec_hash: str
     source_backend: str
     source_runs: List[str]
     observation_schema: Dict[str, Any]
@@ -258,6 +273,7 @@ class TrajectoryDatasetArtifact:
     frame_count: int
     storage_uri: str
     data_provenance: str
+    artifact_refs: List[Dict[str, Any]]
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TrajectoryDatasetArtifact":
@@ -266,18 +282,51 @@ class TrajectoryDatasetArtifact:
         _check_choice(backend, SIMULATOR_BACKENDS, "trajectory dataset source_backend")
         provenance = str(_require(data, "data_provenance", "trajectory dataset"))
         _check_choice(provenance, DATA_PROVENANCE, "trajectory dataset data_provenance")
+        task_spec_hash = _non_empty_str(
+            _require(data, "task_spec_hash", "trajectory dataset"),
+            "trajectory dataset task_spec_hash",
+        )
+        source_runs = [
+            _non_empty_str(item, "trajectory dataset source_runs[]")
+            for item in _as_list(
+                _require(data, "source_runs", "trajectory dataset"),
+                "trajectory dataset source_runs",
+            )
+        ]
+        if not source_runs:
+            raise RobotContractError("trajectory dataset: source_runs must be non-empty")
+        episode_count = _positive_int(
+            _require(data, "episode_count", "trajectory dataset"),
+            "trajectory dataset episode_count",
+        )
+        frame_count = _positive_int(
+            _require(data, "frame_count", "trajectory dataset"),
+            "trajectory dataset frame_count",
+        )
+        artifact_refs = [
+            _as_dict(item, "trajectory dataset artifact_refs[]")
+            for item in _as_list(
+                _require(data, "artifact_refs", "trajectory dataset"),
+                "trajectory dataset artifact_refs",
+            )
+        ]
         return cls(
             schema_version=str(data["schema_version"]),
             artifact_id=str(_require(data, "artifact_id", "trajectory dataset")),
             task_spec_uri=str(_require(data, "task_spec_uri", "trajectory dataset")),
+            task_spec_hash=task_spec_hash,
             source_backend=backend,
-            source_runs=[str(item) for item in _as_list(_require(data, "source_runs", "trajectory dataset"), "trajectory dataset source_runs")],
+            source_runs=source_runs,
             observation_schema=_as_dict(_require(data, "observation_schema", "trajectory dataset"), "trajectory dataset observation_schema"),
             action_schema=_as_dict(_require(data, "action_schema", "trajectory dataset"), "trajectory dataset action_schema"),
-            episode_count=int(_require(data, "episode_count", "trajectory dataset")),
-            frame_count=int(_require(data, "frame_count", "trajectory dataset")),
-            storage_uri=str(_require(data, "storage_uri", "trajectory dataset")),
+            episode_count=episode_count,
+            frame_count=frame_count,
+            storage_uri=_non_empty_str(
+                _require(data, "storage_uri", "trajectory dataset"),
+                "trajectory dataset storage_uri",
+            ),
             data_provenance=provenance,
+            artifact_refs=artifact_refs,
         )
 
     def to_dict(self) -> Dict[str, Any]:

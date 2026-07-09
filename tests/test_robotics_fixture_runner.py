@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from test_robotics_contracts import task_dict
 
 from cybernetics.robotics import (
     FixtureRobotEnv,
@@ -12,8 +13,6 @@ from cybernetics.robotics import (
     RobotTaskSpec,
     run_robot_episode,
 )
-
-from test_robotics_contracts import task_dict
 
 
 def test_fixture_robot_env_reset_step_state_and_close() -> None:
