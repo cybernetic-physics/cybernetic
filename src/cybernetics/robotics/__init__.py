@@ -31,6 +31,13 @@ from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
 from .locomujoco import LocoMuJoCoRobotEnv
 from .runner import default_action, deterministic_run_id, run_robot_episode
+from .worldlines import (
+    WorldlinesAdapterError,
+    WorldlinesModelPlaneAdapter,
+    WorldlinesTrainingConfig,
+    build_worldlines_training_payload,
+    train_worldlines_policy,
+)
 
 __all__ = [
     "ROBOT_DATASET_SCHEMA_VERSION",
@@ -48,11 +55,16 @@ __all__ = [
     "StepResult",
     "TrajectoryDatasetArtifact",
     "WorldModelArtifact",
+    "WorldlinesAdapterError",
+    "WorldlinesModelPlaneAdapter",
+    "WorldlinesTrainingConfig",
+    "build_worldlines_training_payload",
     "default_action",
     "create_trajectory_dataset_from_runs",
     "deterministic_run_id",
     "run_robot_episode",
     "stable_hash",
+    "train_worldlines_policy",
     "write_json_artifact",
     "write_policy_artifact",
     "write_robot_run_record",
