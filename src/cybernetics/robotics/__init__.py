@@ -23,6 +23,7 @@ from .contracts import (
 )
 from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
+from .locomujoco import LocoMuJoCoRobotEnv
 from .runner import default_action, deterministic_run_id, run_robot_episode
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "ROBOT_TASK_SCHEMA_VERSION",
     "WORLD_MODEL_SCHEMA_VERSION",
     "FixtureRobotEnv",
+    "LocoMuJoCoRobotEnv",
     "PolicyArtifact",
     "RobotContractError",
     "RobotEnv",

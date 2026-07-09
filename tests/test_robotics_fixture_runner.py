@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import json
 
-from cybernetics.robotics import FixtureRobotEnv, RobotRunRecord, RobotTaskSpec, run_robot_episode
+import pytest
+
+from cybernetics.robotics import (
+    FixtureRobotEnv,
+    LocoMuJoCoRobotEnv,
+    RobotEnv,
+    RobotRunRecord,
+    RobotTaskSpec,
+    run_robot_episode,
+)
 
 from test_robotics_contracts import task_dict
 
@@ -60,3 +69,13 @@ def test_run_robot_episode_failure_is_diagnosable(tmp_path) -> None:
     saved = RobotRunRecord.from_dict(json.loads((tmp_path / "run_record.json").read_text()))
     assert saved.status == "failed"
     assert "policy exploded" in (saved.error or "")
+
+
+def test_locomujoco_skeleton_conforms_without_runtime_dependency() -> None:
+    env = LocoMuJoCoRobotEnv()
+
+    assert isinstance(env, RobotEnv)
+    with pytest.raises(NotImplementedError, match="inert skeleton"):
+        env.reset(seed=1)
+    env.close()
+    assert env.closed is True
