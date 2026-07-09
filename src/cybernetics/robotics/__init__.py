@@ -30,6 +30,11 @@ from .datasets import create_trajectory_dataset_from_runs
 from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
 from .locomujoco import LocoMuJoCoRobotEnv
+from .replay import (
+    ReplayImportRequest,
+    build_replay_import_request,
+    validate_policy_for_replay,
+)
 from .runner import default_action, deterministic_run_id, run_robot_episode
 from .vla_eval import (
     VLA_EVAL_RECORD_SCHEMA_VERSION,
@@ -59,6 +64,7 @@ __all__ = [
     "FixtureRobotEnv",
     "LocoMuJoCoRobotEnv",
     "PolicyArtifact",
+    "ReplayImportRequest",
     "RobotContractError",
     "RobotEnv",
     "RobotRunRecord",
@@ -70,6 +76,7 @@ __all__ = [
     "WorldlinesAdapterError",
     "WorldlinesModelPlaneAdapter",
     "WorldlinesTrainingConfig",
+    "build_replay_import_request",
     "build_vla_eval_request",
     "build_cosmos_world_model_payload",
     "build_worldlines_training_payload",
@@ -81,6 +88,7 @@ __all__ = [
     "run_robot_episode",
     "stable_hash",
     "train_worldlines_policy",
+    "validate_policy_for_replay",
     "write_json_artifact",
     "write_policy_artifact",
     "write_robot_run_record",
