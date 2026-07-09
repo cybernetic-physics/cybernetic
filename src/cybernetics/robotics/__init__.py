@@ -37,6 +37,10 @@ from .vla_eval import (
     build_vla_eval_request,
     create_vla_eval_record,
 )
+from .world_models import (
+    build_cosmos_world_model_payload,
+    create_synthetic_dataset_from_world_model,
+)
 from .worldlines import (
     WorldlinesAdapterError,
     WorldlinesModelPlaneAdapter,
@@ -67,7 +71,9 @@ __all__ = [
     "WorldlinesModelPlaneAdapter",
     "WorldlinesTrainingConfig",
     "build_vla_eval_request",
+    "build_cosmos_world_model_payload",
     "build_worldlines_training_payload",
+    "create_synthetic_dataset_from_world_model",
     "create_vla_eval_record",
     "default_action",
     "create_trajectory_dataset_from_runs",

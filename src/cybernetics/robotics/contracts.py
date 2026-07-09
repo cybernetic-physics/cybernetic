@@ -368,6 +368,9 @@ class TrajectoryDatasetArtifact:
 class WorldModelArtifact:
     schema_version: str
     artifact_id: str
+    task_spec_uri: str
+    task_spec_hash: str
+    source_dataset_artifact_id: str
     model_family: str
     model_uri: str
     model_role: str
@@ -388,19 +391,46 @@ class WorldModelArtifact:
         _check_choice(role, WORLD_MODEL_ROLES, "world model artifact model_role")
         return cls(
             schema_version=str(data["schema_version"]),
-            artifact_id=str(_require(data, "artifact_id", "world model artifact")),
-            model_family=str(_require(data, "model_family", "world model artifact")),
-            model_uri=str(_require(data, "model_uri", "world model artifact")),
+            artifact_id=_non_empty_str(
+                _require(data, "artifact_id", "world model artifact"),
+                "world model artifact artifact_id",
+            ),
+            task_spec_uri=_non_empty_str(
+                _require(data, "task_spec_uri", "world model artifact"),
+                "world model artifact task_spec_uri",
+            ),
+            task_spec_hash=_non_empty_str(
+                _require(data, "task_spec_hash", "world model artifact"),
+                "world model artifact task_spec_hash",
+            ),
+            source_dataset_artifact_id=_non_empty_str(
+                _require(data, "source_dataset_artifact_id", "world model artifact"),
+                "world model artifact source_dataset_artifact_id",
+            ),
+            model_family=_non_empty_str(
+                _require(data, "model_family", "world model artifact"),
+                "world model artifact model_family",
+            ),
+            model_uri=_non_empty_str(
+                _require(data, "model_uri", "world model artifact"),
+                "world model artifact model_uri",
+            ),
             model_role=role,
             input_schema=_as_dict(_require(data, "input_schema", "world model artifact"), "world model artifact input_schema"),
             output_schema=_as_dict(_require(data, "output_schema", "world model artifact"), "world model artifact output_schema"),
             horizon=_positive_float(_require(data, "horizon", "world model artifact"), "world model artifact horizon"),
             dt=_positive_float(_require(data, "dt", "world model artifact"), "world model artifact dt"),
-            finetune_dataset_uri=str(_require(data, "finetune_dataset_uri", "world model artifact")),
+            finetune_dataset_uri=_non_empty_str(
+                _require(data, "finetune_dataset_uri", "world model artifact"),
+                "world model artifact finetune_dataset_uri",
+            ),
             synthetic_data_policy=_as_dict(_require(data, "synthetic_data_policy", "world model artifact"), "world model artifact synthetic_data_policy"),
             calibration_metrics=_as_dict(_require(data, "calibration_metrics", "world model artifact"), "world model artifact calibration_metrics"),
             backend_version=str(_require(data, "backend_version", "world model artifact")),
-            created_by_run_id=str(_require(data, "created_by_run_id", "world model artifact")),
+            created_by_run_id=_non_empty_str(
+                _require(data, "created_by_run_id", "world model artifact"),
+                "world model artifact created_by_run_id",
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
