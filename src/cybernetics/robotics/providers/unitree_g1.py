@@ -9,7 +9,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ..contracts import ROBOT_TASK_SCHEMA_VERSION, SIMULATOR_BACKENDS, RobotContractError
+from ..contracts import (
+    ROBOT_TASK_SCHEMA_VERSION,
+    ROBOT_TRANSPORT_SCHEMA_VERSION,
+    SIMULATOR_BACKENDS,
+    RobotContractError,
+    TransportSpec,
+)
 
 ROBOT_ID = "unitree_g1"
 
@@ -213,19 +219,33 @@ def resolve_isaac_neko_joint_indices(
 def unitree_g1_transport_template(kind: str = "ros2") -> dict[str, Any]:
     if kind not in {"ros2", "dds"}:
         raise RobotContractError("unitree_g1 transport kind must be 'ros2' or 'dds'")
-    return {
-        "kind": kind,
-        "optional": True,
-        "domain_id": 0,
-        "isolation": "per-session",
-        "ros_distro": "jazzy",
-        "dds_vendor": "cyclonedds",
-        "topics": {
-            "lowcmd": "rt/lowcmd",
-            "lowstate": "rt/lowstate",
+    return TransportSpec.from_dict(
+        {
+            "schema_version": ROBOT_TRANSPORT_SCHEMA_VERSION,
+            "kind": kind,
+            "optional": True,
+            "domain_id": 0,
+            "isolation": "per-session",
+            "qos": {"vendor": "cyclonedds", "ros_distro": "jazzy"},
+            "topics": [
+                {
+                    "name": "lowcmd",
+                    "topic": "rt/lowcmd",
+                    "direction": "publish",
+                    "message_type": "unitree_hg/msg/LowCmd",
+                },
+                {
+                    "name": "lowstate",
+                    "topic": "rt/lowstate",
+                    "direction": "subscribe",
+                    "message_type": "unitree_hg/msg/LowState",
+                },
+            ],
+            "metadata": {
+                "notes": "TransportSpec lane only; not required by the base RobotTaskSpec.",
+            },
         },
-        "notes": "TransportSpec lane only; not required by the base RobotTaskSpec.",
-    }
+    ).to_dict()
 
 
 def _limit_for_joint(name: str) -> JointLimit:
