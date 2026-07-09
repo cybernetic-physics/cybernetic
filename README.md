@@ -202,6 +202,20 @@ environment path without importing MuJoCo, Isaac, ROS2, Unitree, Worldlines, or
 Cosmos runtime packages. Hosted training, LocoMuJoCo adapters, and Isaac/Neko
 replay can build behind the same task/run/policy artifact boundary.
 
+The same local authoring loop is available from the CLI:
+
+```bash
+cybernetics --format json robot-task validate robot-task.json
+cybernetics robot-task run-fixture robot-task.json artifacts/fixture-run --seed 42
+cybernetics robot-task policy-artifact robot-task.json artifacts/policy.json \
+  --artifact-id pol_fixture \
+  --created-by-run-id rrun_fixture \
+  --checkpoint-uri worldlines://fixture/checkpoints/latest \
+  --policy-format worldlines \
+  --rollout-artifact artifacts/fixture-run/rollout.json \
+  --eval-metric success_rate=1.0
+```
+
 ## DreamZero examples
 
 The repository ships an SDK-native DreamZero SFT smoke at
