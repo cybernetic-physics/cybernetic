@@ -24,6 +24,7 @@ class Client:
         self._base_url = base_url
         self._http_client = http_client
         self._sim: Any | None = None
+        self._robotics: Any | None = None
 
     @property
     def sim(self) -> Any:
@@ -37,9 +38,23 @@ class Client:
             )
         return self._sim
 
+    @property
+    def robotics(self) -> Any:
+        if self._robotics is None:
+            from .robotics import RobotEvalsClient
+
+            self._robotics = RobotEvalsClient(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                http_client=self._http_client,
+            )
+        return self._robotics
+
     def close(self) -> None:
         if self._sim is not None:
             self._sim.close()
+        if self._robotics is not None:
+            self._robotics.close()
 
     def __enter__(self) -> "Client":
         return self

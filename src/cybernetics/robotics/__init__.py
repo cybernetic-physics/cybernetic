@@ -12,6 +12,7 @@ from .artifacts import (
     write_robot_run_record,
     write_trajectory_dataset_artifact,
 )
+from .client import RobotEvalsClient, RobotEvalsError
 from .contracts import (
     ROBOT_DATASET_SCHEMA_VERSION,
     ROBOT_POLICY_SCHEMA_VERSION,
@@ -27,8 +28,10 @@ from .contracts import (
     stable_hash,
 )
 from .datasets import create_trajectory_dataset_from_runs
-from .env import RobotEnv, StepResult
+from .env import ObservationBundle, RobotEnv, StepResult, VectorRobotEnv, VectorStepResult
+from .evidence import RoboticsEvidenceError, write_robotics_behavior_bundle
 from .fixture import FixtureRobotEnv
+from .gymnasium import GymnasiumRobotEnvAdapter, GymnasiumVectorEnvAdapter, RobotBackendError
 from .locomujoco import LocoMuJoCoRobotEnv
 from .replay import (
     ReplayImportRequest,
@@ -36,6 +39,30 @@ from .replay import (
     validate_policy_for_replay,
 )
 from .runner import default_action, deterministic_run_id, run_robot_episode
+from .runtime_contracts import (
+    ARTIFACT_REF_SCHEMA_VERSION,
+    ASSET_BUNDLE_REF_SCHEMA_VERSION,
+    ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
+    EPISODE_MANIFEST_SCHEMA_VERSION,
+    ROBOTICS_JOB_SCHEMA_VERSION,
+    ActionChunk,
+    ActionSpec,
+    ArtifactRef,
+    AssetBundleRef,
+    AssetMountSpec,
+    EnvironmentFactorySpec,
+    EnvironmentPackageSpec,
+    EnvironmentReadinessSpec,
+    EpisodeManifest,
+    EpisodePlan,
+    EvaluationCheck,
+    EvaluationSpec,
+    PolicySpec,
+    RecordingSpec,
+    RoboticsJobSpec,
+    RuntimeResources,
+    TensorSpec,
+)
 from .vla_eval import (
     VLA_EVAL_RECORD_SCHEMA_VERSION,
     VlaEvalRunRecord,
@@ -56,20 +83,51 @@ from .worldlines import (
 
 __all__ = [
     "ROBOT_DATASET_SCHEMA_VERSION",
+    "ARTIFACT_REF_SCHEMA_VERSION",
+    "ASSET_BUNDLE_REF_SCHEMA_VERSION",
+    "ENVIRONMENT_PACKAGE_SCHEMA_VERSION",
+    "EPISODE_MANIFEST_SCHEMA_VERSION",
     "ROBOT_POLICY_SCHEMA_VERSION",
+    "ROBOTICS_JOB_SCHEMA_VERSION",
     "ROBOT_RUN_SCHEMA_VERSION",
     "ROBOT_TASK_SCHEMA_VERSION",
     "VLA_EVAL_RECORD_SCHEMA_VERSION",
     "WORLD_MODEL_SCHEMA_VERSION",
     "FixtureRobotEnv",
+    "GymnasiumRobotEnvAdapter",
+    "GymnasiumVectorEnvAdapter",
     "LocoMuJoCoRobotEnv",
     "PolicyArtifact",
+    "PolicySpec",
     "ReplayImportRequest",
     "RobotContractError",
+    "RobotEvalsClient",
+    "RobotEvalsError",
+    "RobotBackendError",
     "RobotEnv",
     "RobotRunRecord",
     "RobotTaskSpec",
+    "RoboticsEvidenceError",
+    "RoboticsJobSpec",
+    "RuntimeResources",
     "StepResult",
+    "VectorRobotEnv",
+    "VectorStepResult",
+    "ObservationBundle",
+    "TensorSpec",
+    "ActionSpec",
+    "ActionChunk",
+    "ArtifactRef",
+    "AssetBundleRef",
+    "AssetMountSpec",
+    "EnvironmentFactorySpec",
+    "EnvironmentPackageSpec",
+    "EnvironmentReadinessSpec",
+    "EpisodeManifest",
+    "EpisodePlan",
+    "EvaluationCheck",
+    "EvaluationSpec",
+    "RecordingSpec",
     "TrajectoryDatasetArtifact",
     "VlaEvalRunRecord",
     "WorldModelArtifact",
@@ -92,5 +150,6 @@ __all__ = [
     "write_json_artifact",
     "write_policy_artifact",
     "write_robot_run_record",
+    "write_robotics_behavior_bundle",
     "write_trajectory_dataset_artifact",
 ]

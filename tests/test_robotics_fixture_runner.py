@@ -70,6 +70,17 @@ def test_run_robot_episode_failure_is_diagnosable(tmp_path) -> None:
     assert "policy exploded" in (saved.error or "")
 
 
+def test_termination_without_success_metric_is_not_reported_as_success(tmp_path) -> None:
+    spec = RobotTaskSpec.from_dict(task_dict())
+    env = FixtureRobotEnv(max_steps=1, success_position=99.0)
+
+    record = run_robot_episode(spec, env, tmp_path, seed=1)
+
+    assert record.status == "truncated"
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert metrics["success"] is False
+
+
 def test_locomujoco_skeleton_conforms_without_runtime_dependency() -> None:
     env = LocoMuJoCoRobotEnv()
 
