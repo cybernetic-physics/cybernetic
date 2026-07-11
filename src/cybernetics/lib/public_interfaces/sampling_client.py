@@ -60,6 +60,7 @@ class _SampleRPC(SidecarRPC):
     """Typed RPC for SamplingClient.sample()."""
 
     prompt: types.ModelInput
+    conditioning: types.PolicyConditioning | None
     num_samples: int
     sampling_params: types.SamplingParams
     include_prompt_logprobs: bool
@@ -68,6 +69,7 @@ class _SampleRPC(SidecarRPC):
     async def execute(self, target: Any) -> Any:
         return target.sample(
             prompt=self.prompt,
+            conditioning=self.conditioning,
             num_samples=self.num_samples,
             sampling_params=self.sampling_params,
             include_prompt_logprobs=self.include_prompt_logprobs,
@@ -240,6 +242,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         self,
         num_samples: int,
         prompt: types.ModelInput,
+        conditioning: types.PolicyConditioning | None,
         sampling_params: types.SamplingParams,
         include_prompt_logprobs: bool,
         topk_prompt_logprobs: int,
@@ -254,6 +257,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 seq_id=request_id,
                 num_samples=num_samples,
                 prompt=prompt,
+                conditioning=conditioning,
                 sampling_params=sampling_params,
                 prompt_logprobs=include_prompt_logprobs,
                 topk_prompt_logprobs=topk_prompt_logprobs,
@@ -281,6 +285,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
     async def _sample_async_impl(
         self,
         prompt: types.ModelInput,
+        conditioning: types.PolicyConditioning | None,
         num_samples: int,
         sampling_params: types.SamplingParams,
         include_prompt_logprobs: bool,
@@ -304,6 +309,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                     self._send_asample_request,
                     num_samples,
                     prompt,
+                    conditioning,
                     sampling_params,
                     include_prompt_logprobs,
                     topk_prompt_logprobs,
@@ -347,11 +353,14 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         sampling_params: types.SamplingParams,
         include_prompt_logprobs: bool = False,
         topk_prompt_logprobs: int = 0,
+        conditioning: types.PolicyConditioning | None = None,
     ) -> ConcurrentFuture[types.SampleResponse]:
-        """Generate text completions from the model.
+        """Generate token completions or continuous-policy rollout artifacts.
 
         Args:
-        - `prompt`: The input tokens as ModelInput
+        - `prompt`: Optional input tokens as ModelInput
+        - `conditioning`: Optional continuous-policy tensors such as DreamZero
+          RGB/state/mask/embodiment inputs.
         - `num_samples`: Number of independent samples to generate
         - `sampling_params`: Parameters controlling generation (temperature, max_tokens, etc.)
         - `include_prompt_logprobs`: Whether to include log probabilities for prompt tokens
@@ -374,6 +383,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
             return self._sampling_client_sidecar_handle.submit_rpc(
                 _SampleRPC(
                     prompt=prompt,
+                    conditioning=conditioning,
                     num_samples=num_samples,
                     sampling_params=sampling_params,
                     include_prompt_logprobs=include_prompt_logprobs,
@@ -384,6 +394,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         async def _sample_async():
             return await self._sample_async_impl(
                 prompt,
+                conditioning,
                 num_samples,
                 sampling_params,
                 include_prompt_logprobs,
@@ -404,6 +415,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         sampling_params: types.SamplingParams,
         include_prompt_logprobs: bool = False,
         topk_prompt_logprobs: int = 0,
+        conditioning: types.PolicyConditioning | None = None,
     ) -> types.SampleResponse:
         """Async version of sample."""
         return await AwaitableConcurrentFuture(
@@ -413,6 +425,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 sampling_params,
                 include_prompt_logprobs,
                 topk_prompt_logprobs,
+                conditioning,
             )
         )
 
@@ -445,6 +458,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         async def _compute_logprobs_async() -> list[float | None]:
             sample_res = await self._sample_async_impl(
                 prompt,
+                None,
                 num_samples=1,
                 sampling_params=types.SamplingParams(max_tokens=1),
                 include_prompt_logprobs=True,

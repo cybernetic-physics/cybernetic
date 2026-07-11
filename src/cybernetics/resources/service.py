@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 from .._base_client import make_request_options
@@ -17,6 +19,14 @@ from ..types.session_heartbeat_request import SessionHeartbeatRequest
 from ..types.session_heartbeat_response import SessionHeartbeatResponse
 
 __all__ = ["AsyncServiceResource"]
+
+
+def _model_dump_omit_none(request: Any) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in model_dump(request, exclude_unset=True, mode="json").items()
+        if value is not None
+    }
 
 
 class AsyncServiceResource(AsyncAPIResource):
@@ -209,9 +219,10 @@ class AsyncServiceResource(AsyncAPIResource):
         if max_retries is not NOT_GIVEN:
             options["max_retries"] = max_retries
 
+        body = _model_dump_omit_none(request)
         return await self._post(
             "/api/v1/create_sampling_session",
-            body=model_dump(request, exclude_unset=True, mode="json"),
+            body=body,
             options=options,
             cast_to=CreateSamplingSessionResponse,
         )

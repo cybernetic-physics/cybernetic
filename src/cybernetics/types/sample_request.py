@@ -1,10 +1,12 @@
 from typing import Optional
 
+from pydantic import Field
 from typing_extensions import Literal
 
 from .._compat import PYDANTIC_V2, ConfigDict
 from .._models import StrictBase
 from .model_input import ModelInput
+from .policy_conditioning import PolicyConditioning
 from .sampling_params import SamplingParams
 
 __all__ = ["SampleRequest"]
@@ -14,7 +16,20 @@ class SampleRequest(StrictBase):
     num_samples: int = 1
     """Number of samples to generate"""
 
-    prompt: ModelInput
+    prompt: ModelInput = Field(default_factory=ModelInput.empty)
+    """Optional token prompt.
+
+    Token LLM samplers use this as their full conditioning context. Continuous
+    policies such as DreamZero may leave it empty and instead provide
+    ``conditioning`` tensors.
+    """
+
+    conditioning: Optional[PolicyConditioning] = None
+    """Runtime-native continuous-policy conditioning tensors.
+
+    DreamZero expects RGB frames, proprioceptive state, masks, and embodiment
+    conditioning at this boundary. Token-only samplers ignore this field.
+    """
 
     sampling_params: SamplingParams
 
