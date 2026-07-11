@@ -96,6 +96,15 @@ from .worldlines import (
     build_worldlines_training_payload,
     train_worldlines_policy,
 )
+from .worldlines_policy_service import (
+    WORLDLINES_POLICY_CONNECTION_VERSION,
+    WORLDLINES_POLICY_TRANSPORT,
+    WorldlinesPolicyConnection,
+    WorldlinesPolicyConnectionError,
+    WorldlinesPolicyServiceClient,
+    WorldlinesPolicyServiceError,
+    WorldlinesPolicyTransportError,
+)
 
 __all__ = [
     "ROBOT_DATASET_SCHEMA_VERSION",
@@ -162,6 +171,13 @@ __all__ = [
     "WorldlinesAdapterError",
     "WorldlinesModelPlaneAdapter",
     "WorldlinesTrainingConfig",
+    "WORLDLINES_POLICY_CONNECTION_VERSION",
+    "WORLDLINES_POLICY_TRANSPORT",
+    "WorldlinesPolicyConnection",
+    "WorldlinesPolicyConnectionError",
+    "WorldlinesPolicyServiceClient",
+    "WorldlinesPolicyServiceError",
+    "WorldlinesPolicyTransportError",
     "build_replay_import_request",
     "build_vla_eval_request",
     "build_cosmos_world_model_payload",

@@ -16,6 +16,7 @@ dependencies = [
   "distro>=1.7.0, <2",
   "sniffio",
   "numpy",            # CORE: top-level import in types/tensor_data.py + types/datum.py
+  "msgpack>=1.1.0,<2",
   "rich>=13.0.0",
   "click>=8.0.0",
 ]
