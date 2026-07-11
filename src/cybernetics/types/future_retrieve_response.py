@@ -7,6 +7,7 @@ from .forward_backward_output import ForwardBackwardOutput
 from .load_weights_response import LoadWeightsResponse
 from .optim_step_response import OptimStepResponse
 from .request_failed_response import RequestFailedResponse
+from .sample_response import SampleResponse
 from .save_weights_for_sampler_response import SaveWeightsForSamplerResponse
 from .save_weights_response import SaveWeightsResponse
 from .try_again_response import TryAgainResponse
@@ -21,6 +22,7 @@ FutureRetrieveResponse: TypeAlias = Union[
     SaveWeightsResponse,
     LoadWeightsResponse,
     SaveWeightsForSamplerResponse,
+    SampleResponse,
     CreateModelResponse,
     UnloadModelResponse,
     RequestFailedResponse,

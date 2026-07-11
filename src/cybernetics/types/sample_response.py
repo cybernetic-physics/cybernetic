@@ -3,7 +3,9 @@ from typing import List, Optional, Sequence
 from typing_extensions import Literal
 
 from .._models import BaseModel
+from .policy_trajectory_step import PolicyTrajectoryStep
 from .sampled_sequence import SampledSequence
+from .tensor_data import TensorData
 
 __all__ = ["SampleResponse"]
 
@@ -27,3 +29,15 @@ class SampleResponse(BaseModel):
     `topk_prompt_logprobs` response contains, for every token in the prompt,
     a list of up to k (token_id, logprob) tuples.
     """
+
+    action_chunk: Optional[TensorData] = None
+    """Continuous action chunk returned by a policy sampler such as DreamZero."""
+
+    trajectory: Optional[list[PolicyTrajectoryStep]] = None
+    """Per-step continuous-policy rollout artifacts used by RL losses."""
+
+    video: Optional[TensorData] = None
+    """Predicted future video clip returned by video/world-model samplers."""
+
+    predicted_video: Optional[TensorData] = None
+    """Alias field for future-video predictions from continuous-policy runtimes."""

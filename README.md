@@ -208,6 +208,33 @@ Wan/DreamZero asset cache and load sharded model weights. Use a timeout large
 enough for that first run, and use `cybernetics doctor --require-rl` before
 spending GPU time.
 
+DreamZero sampling is a continuous-policy rollout, not token generation. Use a
+normal `SamplingClient`, but send policy conditioning tensors and read
+continuous artifacts from the response:
+
+```python
+sampler = service_client.create_sampling_client(base_model="dreamzero-droid")
+conditioning = {
+    "images": types.TensorData(data=[...], dtype="int64", shape=[1, 3, 176, 320, 3]),
+    "state": types.TensorData(data=[...], dtype="float32", shape=[1, 1, 64]),
+    "state_mask": types.TensorData(data=[1], dtype="int64", shape=[1]),
+    "embodiment_id": types.TensorData(data=[0], dtype="int64", shape=[1]),
+}
+result = sampler.sample(
+    types.ModelInput.empty(),
+    1,
+    types.SamplingParams(max_tokens=1),
+    conditioning=conditioning,
+).result()
+actions = result.action_chunk
+trajectory = result.trajectory
+future_video = result.predicted_video or result.video
+```
+
+For base-model sampling the SDK omits `model_path`; do not send
+`model_path: null`. Token-only clients may ignore `action_chunk`, `trajectory`,
+and video fields, but VLA callers should treat those as the primary result.
+
 ## Optional dependencies
 
 | Extra | Adds | Needed for |

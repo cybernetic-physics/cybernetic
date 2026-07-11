@@ -1088,12 +1088,15 @@ class InternalClientHolder(AsyncCyberneticsProvider, TelemetryProvider):
         sampling_session_seq_id = self._sampling_client_counter
         self._sampling_client_counter += 1
         with self.aclient(ClientConnectionPoolType.SESSION) as client:
-            request = types.CreateSamplingSessionRequest(
-                session_id=self._session_id,
-                sampling_session_seq_id=sampling_session_seq_id,
-                model_path=model_path,
-                base_model=base_model,
-            )
+            request_kwargs: dict[str, Any] = {
+                "session_id": self._session_id,
+                "sampling_session_seq_id": sampling_session_seq_id,
+            }
+            if model_path is not None:
+                request_kwargs["model_path"] = model_path
+            if base_model is not None:
+                request_kwargs["base_model"] = base_model
+            request = types.CreateSamplingSessionRequest(**request_kwargs)
             result = await client.service.create_sampling_session(request=request)
             return result.sampling_session_id
 
