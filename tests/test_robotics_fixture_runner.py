@@ -7,7 +7,9 @@ from test_robotics_contracts import task_dict
 
 from cybernetics.robotics import (
     FixtureRobotEnv,
+    GymnasiumRobotEnvAdapter,
     LocoMuJoCoRobotEnv,
+    RobotBackendError,
     RobotEnv,
     RobotRunRecord,
     RobotTaskSpec,
@@ -70,11 +72,76 @@ def test_run_robot_episode_failure_is_diagnosable(tmp_path) -> None:
     assert "policy exploded" in (saved.error or "")
 
 
-def test_locomujoco_skeleton_conforms_without_runtime_dependency() -> None:
-    env = LocoMuJoCoRobotEnv()
+class FakeGymnasiumEnv:
+    def __init__(self) -> None:
+        self.position = 0.0
+        self.closed = False
+
+    def reset(self, *, seed=None, options=None):
+        self.position = float((options or {}).get("position", 0.0))
+        return {"position": self.position, "seed": seed}, {"reset": True}
+
+    def step(self, action):
+        self.position += float(action)
+        return (
+            {"position": self.position},
+            self.position,
+            self.position >= 2.0,
+            False,
+            {"raw_action": action},
+        )
+
+    def render(self):
+        return {"frame_position": self.position}
+
+    def get_state(self):
+        return {"position": self.position}
+
+    def set_state(self, state):
+        self.position = float(state["position"])
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_gymnasium_adapter_wraps_env_without_runtime_dependency() -> None:
+    env = GymnasiumRobotEnvAdapter(FakeGymnasiumEnv(), action_key="delta")
 
     assert isinstance(env, RobotEnv)
-    with pytest.raises(NotImplementedError, match="inert skeleton"):
-        env.reset(seed=1)
+    assert env.reset(seed=1) == {"position": 0.0, "seed": 1}
+    first = env.step({"delta": 1.25})
+    assert first.observation == {"position": 1.25}
+    assert first.reward == 1.25
+    assert first.terminated is False
+    second = env.step({"delta": 0.75})
+    assert second.terminated is True
+    assert env.render() == {"frame_position": 2.0}
+    assert env.capture({"mode": "rgb_array"})["backend_id"] == "gymnasium"
+    env.set_state({"position": 0.5})
+    assert env.get_state() == {"position": 0.5}
     env.close()
     assert env.closed is True
+
+
+def test_locomujoco_adapter_can_wrap_existing_env_without_importing_runtime() -> None:
+    task = RobotTaskSpec.from_dict(
+        {**task_dict(), "simulator_backend": "locomujoco", "backend_config": {"image": "test"}}
+    )
+
+    env = LocoMuJoCoRobotEnv(task, env=FakeGymnasiumEnv(), action_key="delta")
+
+    assert isinstance(env, RobotEnv)
+    assert env.backend_id == "locomujoco"
+    assert env.reset(seed=3)["seed"] == 3
+    assert env.step({"delta": 2.0}).terminated is True
+    env.close()
+
+
+def test_locomujoco_adapter_missing_runtime_is_diagnosable(monkeypatch) -> None:
+    def missing_runtime(**_kwargs):
+        raise RobotBackendError("missing optional runtime")
+
+    monkeypatch.setattr("cybernetics.robotics.locomujoco._make_locomujoco_env", missing_runtime)
+
+    with pytest.raises(RobotBackendError, match="missing optional runtime"):
+        LocoMuJoCoRobotEnv(env_name="UnitreeH1.run.real")

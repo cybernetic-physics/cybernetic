@@ -10,6 +10,7 @@ from cybernetics.robotics import (
     RobotContractError,
     RobotTaskSpec,
     TrajectoryDatasetArtifact,
+    TransportSpec,
 )
 
 
@@ -75,6 +76,31 @@ def dataset_dict(task: RobotTaskSpec) -> dict:
     }
 
 
+def transport_dict() -> dict:
+    return {
+        "schema_version": "robot-transport/v1",
+        "kind": "ros2",
+        "optional": True,
+        "topics": [
+            {
+                "name": "lowcmd",
+                "topic": "rt/lowcmd",
+                "direction": "publish",
+                "qos": {"reliability": "best_effort"},
+            },
+            {
+                "name": "lowstate",
+                "topic": "rt/lowstate",
+                "direction": "subscribe",
+            },
+        ],
+        "qos": {"vendor": "cyclonedds"},
+        "domain_id": 0,
+        "isolation": "per-session",
+        "metadata": {"provider": "unitree_g1"},
+    }
+
+
 def test_robot_task_spec_round_trips_and_hashes_joint_map() -> None:
     spec = RobotTaskSpec.from_dict(task_dict())
 
@@ -128,6 +154,39 @@ def test_policy_artifact_checkpoint_uri_is_optional_but_task_hash_is_not() -> No
     data["task_spec_hash"] = ""
     with pytest.raises(RobotContractError, match="task_spec_hash"):
         PolicyArtifact.from_dict(data)
+
+
+def test_transport_spec_round_trips_without_task_coupling() -> None:
+    transport = TransportSpec.from_dict(transport_dict())
+
+    assert transport.kind == "ros2"
+    assert transport.domain_id == 0
+    assert transport.topics[0]["direction"] == "publish"
+    assert TransportSpec.from_dict(transport.to_dict()).to_dict() == transport.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("kind", "rlmesh", "kind"),
+        ("domain_id", -1, "domain_id"),
+        ("topics", [], "topics"),
+    ],
+)
+def test_transport_spec_rejects_invalid_base_fields(field: str, value, match: str) -> None:
+    data = transport_dict()
+    data[field] = value
+
+    with pytest.raises(RobotContractError, match=match):
+        TransportSpec.from_dict(data)
+
+
+def test_transport_spec_rejects_invalid_topic_direction() -> None:
+    data = transport_dict()
+    data["topics"][0]["direction"] = "sideways"
+
+    with pytest.raises(RobotContractError, match="direction"):
+        TransportSpec.from_dict(data)
 
 
 def test_trajectory_dataset_artifact_round_trips_with_sim_provenance() -> None:

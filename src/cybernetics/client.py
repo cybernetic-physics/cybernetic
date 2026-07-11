@@ -24,6 +24,7 @@ class Client:
         self._base_url = base_url
         self._http_client = http_client
         self._sim: Any | None = None
+        self._robot_tasks: Any | None = None
 
     @property
     def sim(self) -> Any:
@@ -36,6 +37,14 @@ class Client:
                 http_client=self._http_client,
             )
         return self._sim
+
+    @property
+    def robot_tasks(self) -> Any:
+        if self._robot_tasks is None:
+            from .robotics import RobotTasksClient
+
+            self._robot_tasks = RobotTasksClient()
+        return self._robot_tasks
 
     def close(self) -> None:
         if self._sim is not None:

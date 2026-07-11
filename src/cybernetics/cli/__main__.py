@@ -23,6 +23,7 @@ from .lazy_group import LazyGroup
         "behavior-ci": "cybernetics.cli.commands.behavior_ci:cli",
         "checkpoint": "cybernetics.cli.commands.checkpoint:cli",
         "doctor": "cybernetics.cli.commands.doctor:cli",
+        "robot-task": "cybernetics.cli.commands.robot_task:cli",
         "run": "cybernetics.cli.commands.run:cli",
         "sim": "cybernetics.cli.commands.sim:cli",
         "version": "cybernetics.cli.commands.version:cli",

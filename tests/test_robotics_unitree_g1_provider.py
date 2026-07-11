@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import pytest
 
 import cybernetics.robotics as robotics
-from cybernetics.robotics import RobotTaskSpec
+from cybernetics.robotics import RobotTaskSpec, TransportSpec
 from cybernetics.robotics.providers import unitree_g1
 
 
@@ -84,11 +84,16 @@ def test_unitree_g1_transport_template_is_optional() -> None:
     transport = unitree_g1.unitree_g1_transport_template("ros2")
 
     assert RobotTaskSpec.from_dict(base_spec).robot_id == "unitree_g1"
+    parsed = TransportSpec.from_dict(transport)
     assert transport["kind"] == "ros2"
-    assert transport["topics"]["lowcmd"] == "rt/lowcmd"
-    assert transport["topics"]["lowstate"] == "rt/lowstate"
-    assert transport["dds_vendor"] == "cyclonedds"
-    assert transport["ros_distro"] == "jazzy"
+    assert parsed.topics[0]["name"] == "lowcmd"
+    assert parsed.topics[0]["topic"] == "rt/lowcmd"
+    assert parsed.topics[0]["direction"] == "publish"
+    assert parsed.topics[1]["name"] == "lowstate"
+    assert parsed.topics[1]["topic"] == "rt/lowstate"
+    assert parsed.topics[1]["direction"] == "subscribe"
+    assert parsed.qos["vendor"] == "cyclonedds"
+    assert parsed.qos["ros_distro"] == "jazzy"
     assert "transport" not in base_spec
 
 

@@ -17,9 +17,12 @@ ROBOT_TASK_SCHEMA_VERSION = "robot-task/v1"
 ROBOT_POLICY_SCHEMA_VERSION = "robot-policy/v1"
 ROBOT_RUN_SCHEMA_VERSION = "robot-run/v1"
 ROBOT_DATASET_SCHEMA_VERSION = "robot-trajectory-dataset/v1"
+ROBOT_TRANSPORT_SCHEMA_VERSION = "robot-transport/v1"
 WORLD_MODEL_SCHEMA_VERSION = "robot-world-model/v1"
 
 SIMULATOR_BACKENDS = ("fixture", "locomujoco", "mujoco", "isaaclab", "isaac_neko")
+TRANSPORT_KINDS = ("inprocess", "ros2", "dds", "http")
+TRANSPORT_DIRECTIONS = ("publish", "subscribe", "bidirectional")
 POLICY_KINDS = ("rl_policy", "vla_policy", "world_action_model")
 POLICY_FORMATS = ("onnx", "torchscript", "rsl_rl", "sb3", "jax", "worldlines", "custom")
 RUN_STATUSES = ("queued", "running", "succeeded", "failed", "truncated", "cancelled")
@@ -86,6 +89,13 @@ def _positive_int(value: Any, where: str) -> int:
     result = int(value)
     if result <= 0:
         raise RobotContractError(f"{where}: must be positive, got {result!r}")
+    return result
+
+
+def _non_negative_int(value: Any, where: str) -> int:
+    result = int(value)
+    if result < 0:
+        raise RobotContractError(f"{where}: must be non-negative, got {result!r}")
     return result
 
 
@@ -178,6 +188,66 @@ class RobotTaskSpec:
 
     def task_hash(self) -> str:
         return stable_hash(self.to_dict())
+
+
+@dataclass(frozen=True)
+class TransportSpec:
+    schema_version: str
+    kind: str
+    optional: bool
+    topics: List[Dict[str, Any]]
+    qos: Dict[str, Any]
+    domain_id: Optional[int]
+    isolation: str
+    metadata: Dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "TransportSpec":
+        _check_schema(data, ROBOT_TRANSPORT_SCHEMA_VERSION, "transport spec")
+        kind = str(_require(data, "kind", "transport spec"))
+        _check_choice(kind, TRANSPORT_KINDS, "transport spec kind")
+        topics = [
+            _transport_topic(item)
+            for item in _as_list(_require(data, "topics", "transport spec"), "transport spec topics")
+        ]
+        if not topics:
+            raise RobotContractError("transport spec: topics must be non-empty")
+        domain_id = data.get("domain_id")
+        return cls(
+            schema_version=str(data["schema_version"]),
+            kind=kind,
+            optional=bool(data.get("optional", True)),
+            topics=topics,
+            qos=_as_dict(data.get("qos", {}), "transport spec qos"),
+            domain_id=_non_negative_int(domain_id, "transport spec domain_id")
+            if domain_id is not None
+            else None,
+            isolation=_non_empty_str(
+                _require(data, "isolation", "transport spec"),
+                "transport spec isolation",
+            ),
+            metadata=_as_dict(data.get("metadata", {}), "transport spec metadata"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _transport_topic(value: Any) -> Dict[str, Any]:
+    topic = _as_dict(value, "transport spec topics[]")
+    result = dict(topic)
+    result["name"] = _non_empty_str(
+        _require(topic, "name", "transport spec topic"), "transport spec topic.name"
+    )
+    result["topic"] = _non_empty_str(
+        _require(topic, "topic", "transport spec topic"), "transport spec topic.topic"
+    )
+    direction = str(_require(topic, "direction", "transport spec topic"))
+    _check_choice(direction, TRANSPORT_DIRECTIONS, "transport spec topic.direction")
+    result["direction"] = direction
+    if "qos" in result:
+        result["qos"] = _as_dict(result["qos"], "transport spec topic.qos")
+    return result
 
 
 @dataclass(frozen=True)

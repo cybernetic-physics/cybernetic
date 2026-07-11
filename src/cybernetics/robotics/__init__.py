@@ -17,25 +17,28 @@ from .contracts import (
     ROBOT_POLICY_SCHEMA_VERSION,
     ROBOT_RUN_SCHEMA_VERSION,
     ROBOT_TASK_SCHEMA_VERSION,
+    ROBOT_TRANSPORT_SCHEMA_VERSION,
     WORLD_MODEL_SCHEMA_VERSION,
     PolicyArtifact,
     RobotContractError,
     RobotRunRecord,
     RobotTaskSpec,
     TrajectoryDatasetArtifact,
+    TransportSpec,
     WorldModelArtifact,
     stable_hash,
 )
 from .datasets import create_trajectory_dataset_from_runs
 from .env import RobotEnv, StepResult
 from .fixture import FixtureRobotEnv
-from .locomujoco import LocoMuJoCoRobotEnv
+from .locomujoco import GymnasiumRobotEnvAdapter, LocoMuJoCoRobotEnv, RobotBackendError
 from .replay import (
     ReplayImportRequest,
     build_replay_import_request,
     validate_policy_for_replay,
 )
 from .runner import default_action, deterministic_run_id, run_robot_episode
+from .task_client import RobotTaskRunResult, RobotTasksClient
 from .vla_eval import (
     VLA_EVAL_RECORD_SCHEMA_VERSION,
     VlaEvalRunRecord,
@@ -59,18 +62,24 @@ __all__ = [
     "ROBOT_POLICY_SCHEMA_VERSION",
     "ROBOT_RUN_SCHEMA_VERSION",
     "ROBOT_TASK_SCHEMA_VERSION",
+    "ROBOT_TRANSPORT_SCHEMA_VERSION",
     "VLA_EVAL_RECORD_SCHEMA_VERSION",
     "WORLD_MODEL_SCHEMA_VERSION",
     "FixtureRobotEnv",
+    "GymnasiumRobotEnvAdapter",
     "LocoMuJoCoRobotEnv",
     "PolicyArtifact",
     "ReplayImportRequest",
     "RobotContractError",
+    "RobotBackendError",
     "RobotEnv",
     "RobotRunRecord",
+    "RobotTaskRunResult",
     "RobotTaskSpec",
+    "RobotTasksClient",
     "StepResult",
     "TrajectoryDatasetArtifact",
+    "TransportSpec",
     "VlaEvalRunRecord",
     "WorldModelArtifact",
     "WorldlinesAdapterError",
