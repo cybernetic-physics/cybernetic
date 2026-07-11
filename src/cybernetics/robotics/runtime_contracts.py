@@ -7,14 +7,18 @@ the SDK remains safe to import in clients, control planes, and CI.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
-from .contracts import RobotContractError, stable_hash
+from .contracts import RobotContractError
 
-ENVIRONMENT_PACKAGE_SCHEMA_VERSION = "robot-environment-package/v1"
+SIMULATOR_PACKAGE_SCHEMA_VERSION = "robot-simulator-package/v1"
+TASK_PACKAGE_SCHEMA_VERSION = "robot-task-package/v1"
+POLICY_DEPLOYMENT_SCHEMA_VERSION = "robot-policy-deployment/v1"
 ASSET_BUNDLE_REF_SCHEMA_VERSION = "asset-bundle-ref/v1"
 ARTIFACT_REF_SCHEMA_VERSION = "robot-artifact-ref/v1"
 ROBOTICS_JOB_SCHEMA_VERSION = "robotics-job/v1"
@@ -23,10 +27,15 @@ EPISODE_MANIFEST_SCHEMA_VERSION = "robot-episode-manifest/v1"
 FACTORY_KINDS = ("gymnasium", "lerobot_envhub", "python")
 FACTORY_VECTORIZATION_MODES = ("sync", "native")
 READINESS_KINDS = ("factory", "method")
-POLICY_SOURCES = ("fixture", "internnav", "lerobot", "worldlines", "endpoint", "python")
+POLICY_DEPLOYMENT_SOURCES = ("fixture", "worldlines", "local")
+POLICY_STATE_MODELS = ("stateless", "recurrent", "history", "dual_system")
+POLICY_RESET_GRANULARITIES = ("session", "batch", "environment")
+PLACEMENT_TOPOLOGIES = ("colocated_required", "colocated_preferred", "separate")
+ACTION_OVERLAP_MODES = ("latest", "fifo", "temporal_ensemble")
 ACTION_REPRESENTATIONS = (
     "discrete",
     "waypoint",
+    "base_velocity",
     "joint_position",
     "joint_velocity",
     "eef_delta",
@@ -41,6 +50,32 @@ CHECK_OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_DIGEST_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _ASSET_MOUNT_PATH_RE = re.compile(r"^/runtime/assets/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_ASSET_MOUNT_ROOT_RE = re.compile(r"^/runtime/assets(?:/[A-Za-z0-9._-]+)*$")
+
+
+def canonical_runtime_json(value: Mapping[str, Any]) -> str:
+    """Canonical JSON shared with the TypeScript robotics contract parser."""
+
+    return json.dumps(
+        _canonical_runtime_value(dict(value)),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def runtime_contract_hash(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_runtime_json(value).encode("utf-8")).hexdigest()
+
+
+def _canonical_runtime_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _canonical_runtime_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_runtime_value(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
 def _require(data: Mapping[str, Any], key: str, where: str) -> Any:
@@ -667,8 +702,29 @@ class RuntimeResources:
         return _contract_dict(self)
 
 
+def _validate_resources_cover(
+    requested: RuntimeResources,
+    required: RuntimeResources,
+    where: str,
+) -> None:
+    for name in ("cpu_cores", "memory_gb", "disk_gb", "gpu_count", "timeout_seconds"):
+        if getattr(requested, name) < getattr(required, name):
+            raise RobotContractError(f"{where}.{name} is below the package requirement")
+    if (
+        required.shm_size_gb is not None
+        and (requested.shm_size_gb or 0) < required.shm_size_gb
+    ):
+        raise RobotContractError(f"{where}.shm_size_gb is below the package requirement")
+    if (
+        required.gpu_count > 0
+        and required.gpu_type is not None
+        and requested.gpu_type != required.gpu_type
+    ):
+        raise RobotContractError(f"{where}.gpu_type does not satisfy the package requirement")
+
+
 @dataclass(frozen=True)
-class EnvironmentPackageSpec:
+class SimulatorPackageSpec:
     schema_version: str
     package_id: str
     simulator: str
@@ -676,18 +732,20 @@ class EnvironmentPackageSpec:
     source_repo: str
     source_ref: str
     runtime_image: str
+    service_entrypoint: str
     factory: EnvironmentFactorySpec
     resources: RuntimeResources
-    asset_mounts: List[AssetMountSpec]
-    observation_schema: Dict[str, TensorSpec]
-    action_spec: ActionSpec
     supports_vectorization: bool
     default_vector_width: int
+    capabilities: List[str]
+    supported_asset_formats: List[str]
+    mount_roots: List[str]
     readiness: EnvironmentReadinessSpec = field(default_factory=EnvironmentReadinessSpec)
+    license: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "EnvironmentPackageSpec":
+    def from_dict(cls, data: Mapping[str, Any]) -> "SimulatorPackageSpec":
         _strict_keys(
             data,
             {
@@ -698,154 +756,290 @@ class EnvironmentPackageSpec:
                 "source_repo",
                 "source_ref",
                 "runtime_image",
+                "service_entrypoint",
                 "factory",
                 "resources",
-                "asset_mounts",
-                "observation_schema",
-                "action_spec",
                 "supports_vectorization",
                 "default_vector_width",
+                "capabilities",
+                "supported_asset_formats",
+                "mount_roots",
                 "readiness",
+                "license",
                 "metadata",
             },
-            "environment package",
+            "simulator package",
         )
-        _schema(data, ENVIRONMENT_PACKAGE_SCHEMA_VERSION, "environment package")
+        _schema(data, SIMULATOR_PACKAGE_SCHEMA_VERSION, "simulator package")
         runtime_image = _string(
-            _require(data, "runtime_image", "environment package"),
-            "environment package.runtime_image",
+            _require(data, "runtime_image", "simulator package"),
+            "simulator package.runtime_image",
         )
         if not _IMAGE_DIGEST_RE.fullmatch(runtime_image):
             raise RobotContractError(
-                "environment package.runtime_image must be pinned by an OCI sha256 digest"
+                "simulator package.runtime_image must be pinned by an OCI sha256 digest"
             )
         supports_vectorization = _boolean(
-            _require(data, "supports_vectorization", "environment package"),
-            "environment package.supports_vectorization",
+            _require(data, "supports_vectorization", "simulator package"),
+            "simulator package.supports_vectorization",
         )
         width = _at_most(
             _positive_int(
-                _require(data, "default_vector_width", "environment package"),
-                "environment package.default_vector_width",
+                _require(data, "default_vector_width", "simulator package"),
+                "simulator package.default_vector_width",
             ),
             4096,
-            "environment package.default_vector_width",
+            "simulator package.default_vector_width",
         )
         if width != 1 and not supports_vectorization:
             raise RobotContractError(
-                "environment package.default_vector_width must be 1 when vectorization is unsupported"
+                "simulator package.default_vector_width must be 1 when vectorization is unsupported"
             )
-        observation_raw = _mapping(
-            _require(data, "observation_schema", "environment package"),
-            "environment package.observation_schema",
+        capabilities = _string_list(
+            _require(data, "capabilities", "simulator package"),
+            "simulator package.capabilities",
         )
-        asset_mounts_raw = _list(data.get("asset_mounts", []), "environment package.asset_mounts")
-        if len(asset_mounts_raw) > 128:
+        if not capabilities:
+            raise RobotContractError("simulator package.capabilities must not be empty")
+        mount_roots = _string_list(
+            _require(data, "mount_roots", "simulator package"),
+            "simulator package.mount_roots",
+        )
+        if not mount_roots or any(not _ASSET_MOUNT_ROOT_RE.fullmatch(root) for root in mount_roots):
             raise RobotContractError(
-                "environment package.asset_mounts must contain at most 128 mounts"
+                "simulator package.mount_roots must contain canonical /runtime/assets children"
             )
-        asset_mounts = [
-            AssetMountSpec.from_dict(_mapping(item, "environment package.asset_mounts[]"))
-            for item in asset_mounts_raw
-        ]
-        _validate_asset_mount_paths(asset_mounts)
         return cls(
-            schema_version=ENVIRONMENT_PACKAGE_SCHEMA_VERSION,
+            schema_version=SIMULATOR_PACKAGE_SCHEMA_VERSION,
             package_id=_string(
-                _require(data, "package_id", "environment package"),
-                "environment package.package_id",
+                _require(data, "package_id", "simulator package"),
+                "simulator package.package_id",
             ),
             simulator=_string(
-                _require(data, "simulator", "environment package"),
-                "environment package.simulator",
+                _require(data, "simulator", "simulator package"),
+                "simulator package.simulator",
             ),
             simulator_version=_string(
-                _require(data, "simulator_version", "environment package"),
-                "environment package.simulator_version",
+                _require(data, "simulator_version", "simulator package"),
+                "simulator package.simulator_version",
             ),
             source_repo=_string(
-                _require(data, "source_repo", "environment package"),
-                "environment package.source_repo",
+                _require(data, "source_repo", "simulator package"),
+                "simulator package.source_repo",
             ),
             source_ref=_string(
-                _require(data, "source_ref", "environment package"),
-                "environment package.source_ref",
+                _require(data, "source_ref", "simulator package"),
+                "simulator package.source_ref",
             ),
             runtime_image=runtime_image,
+            service_entrypoint=_string(
+                _require(data, "service_entrypoint", "simulator package"),
+                "simulator package.service_entrypoint",
+            ),
             factory=EnvironmentFactorySpec.from_dict(
                 _mapping(
-                    _require(data, "factory", "environment package"), "environment package.factory"
+                    _require(data, "factory", "simulator package"),
+                    "simulator package.factory",
                 )
             ),
             resources=RuntimeResources.from_dict(
                 _mapping(
-                    _require(data, "resources", "environment package"),
-                    "environment package.resources",
-                )
-            ),
-            asset_mounts=asset_mounts,
-            observation_schema={
-                str(name): TensorSpec.from_dict(_mapping(spec, f"observation_schema.{name}"))
-                for name, spec in observation_raw.items()
-            },
-            action_spec=ActionSpec.from_dict(
-                _mapping(
-                    _require(data, "action_spec", "environment package"),
-                    "environment package.action_spec",
+                    _require(data, "resources", "simulator package"),
+                    "simulator package.resources",
                 )
             ),
             supports_vectorization=supports_vectorization,
             default_vector_width=width,
-            readiness=EnvironmentReadinessSpec.from_dict(
-                _mapping(data.get("readiness", {}), "environment package.readiness")
+            capabilities=capabilities,
+            supported_asset_formats=_string_list(
+                data.get("supported_asset_formats", []),
+                "simulator package.supported_asset_formats",
             ),
-            metadata=_mapping(data.get("metadata", {}), "environment package.metadata"),
+            mount_roots=mount_roots,
+            readiness=EnvironmentReadinessSpec.from_dict(
+                _mapping(data.get("readiness", {}), "simulator package.readiness")
+            ),
+            license=_optional_string(data.get("license"), "simulator package.license"),
+            metadata=_mapping(data.get("metadata", {}), "simulator package.metadata"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return _contract_dict(self)
 
     def package_hash(self) -> str:
-        return stable_hash(self.to_dict())
+        return runtime_contract_hash(self.to_dict())
 
 
 @dataclass(frozen=True)
-class PolicySpec:
-    policy_id: str
-    source: str
+class TaskPackageSpec:
+    schema_version: str
+    package_id: str
+    task_id: str
     revision: str
+    source_repo: str
+    source_ref: str
+    compatible_simulators: List[str]
+    required_capabilities: List[str]
+    embodiment_id: str
+    observation_schema: Dict[str, TensorSpec]
     action_spec: ActionSpec
-    artifact_uri: Optional[str] = None
-    processor_revision: Optional[str] = None
-    config: Dict[str, Any] = field(default_factory=dict)
+    asset_mounts: List[AssetMountSpec]
+    adapter_config: Dict[str, Any]
+    dataset: Dict[str, Any]
+    native_metrics: List[str]
+    license: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "PolicySpec":
+    def from_dict(cls, data: Mapping[str, Any]) -> "TaskPackageSpec":
         _strict_keys(
             data,
             {
-                "policy_id",
-                "source",
+                "schema_version",
+                "package_id",
+                "task_id",
                 "revision",
+                "source_repo",
+                "source_ref",
+                "compatible_simulators",
+                "required_capabilities",
+                "embodiment_id",
+                "observation_schema",
                 "action_spec",
-                "artifact_uri",
-                "processor_revision",
-                "config",
+                "asset_mounts",
+                "adapter_config",
+                "dataset",
+                "native_metrics",
+                "license",
+                "metadata",
             },
-            "policy",
+            "task package",
         )
+        _schema(data, TASK_PACKAGE_SCHEMA_VERSION, "task package")
+        compatible = _string_list(
+            _require(data, "compatible_simulators", "task package"),
+            "task package.compatible_simulators",
+        )
+        if not compatible:
+            raise RobotContractError("task package.compatible_simulators must not be empty")
+        observation_raw = _mapping(
+            _require(data, "observation_schema", "task package"),
+            "task package.observation_schema",
+        )
+        if not observation_raw:
+            raise RobotContractError("task package.observation_schema must not be empty")
+        asset_mounts_raw = _list(data.get("asset_mounts", []), "task package.asset_mounts")
+        if len(asset_mounts_raw) > 128:
+            raise RobotContractError("task package.asset_mounts must contain at most 128 mounts")
+        asset_mounts = [
+            AssetMountSpec.from_dict(_mapping(item, "task package.asset_mounts[]"))
+            for item in asset_mounts_raw
+        ]
+        _validate_asset_mount_paths(asset_mounts)
+        native_metrics = _string_list(
+            _require(data, "native_metrics", "task package"),
+            "task package.native_metrics",
+        )
+        if not native_metrics:
+            raise RobotContractError("task package.native_metrics must not be empty")
         return cls(
-            policy_id=_string(_require(data, "policy_id", "policy"), "policy.policy_id"),
-            source=_choice(_require(data, "source", "policy"), POLICY_SOURCES, "policy.source"),
-            revision=_string(_require(data, "revision", "policy"), "policy.revision"),
+            schema_version=TASK_PACKAGE_SCHEMA_VERSION,
+            package_id=_string(
+                _require(data, "package_id", "task package"), "task package.package_id"
+            ),
+            task_id=_string(_require(data, "task_id", "task package"), "task package.task_id"),
+            revision=_string(
+                _require(data, "revision", "task package"), "task package.revision"
+            ),
+            source_repo=_string(
+                _require(data, "source_repo", "task package"), "task package.source_repo"
+            ),
+            source_ref=_string(
+                _require(data, "source_ref", "task package"), "task package.source_ref"
+            ),
+            compatible_simulators=compatible,
+            required_capabilities=_string_list(
+                data.get("required_capabilities", []),
+                "task package.required_capabilities",
+            ),
+            embodiment_id=_string(
+                _require(data, "embodiment_id", "task package"),
+                "task package.embodiment_id",
+            ),
+            observation_schema={
+                str(name): TensorSpec.from_dict(_mapping(spec, f"observation_schema.{name}"))
+                for name, spec in observation_raw.items()
+            },
             action_spec=ActionSpec.from_dict(
-                _mapping(_require(data, "action_spec", "policy"), "policy.action_spec")
+                _mapping(
+                    _require(data, "action_spec", "task package"),
+                    "task package.action_spec",
+                )
             ),
-            artifact_uri=_optional_string(data.get("artifact_uri"), "policy.artifact_uri"),
-            processor_revision=_optional_string(
-                data.get("processor_revision"), "policy.processor_revision"
+            asset_mounts=asset_mounts,
+            adapter_config=_mapping(
+                data.get("adapter_config", {}), "task package.adapter_config"
             ),
-            config=_mapping(data.get("config", {}), "policy.config"),
+            dataset=_mapping(data.get("dataset", {}), "task package.dataset"),
+            native_metrics=native_metrics,
+            license=_string(
+                _require(data, "license", "task package"), "task package.license"
+            ),
+            metadata=_mapping(data.get("metadata", {}), "task package.metadata"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _contract_dict(self)
+
+    def package_hash(self) -> str:
+        return runtime_contract_hash(self.to_dict())
+
+
+@dataclass(frozen=True)
+class ActionSelectionSpec:
+    execution_horizon: int = 1
+    queue_threshold: int = 0
+    overlap: str = "latest"
+    temporal_ensemble_weight: Optional[float] = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ActionSelectionSpec":
+        _strict_keys(
+            data,
+            {"execution_horizon", "queue_threshold", "overlap", "temporal_ensemble_weight"},
+            "action selection",
+        )
+        overlap = _choice(data.get("overlap", "latest"), ACTION_OVERLAP_MODES, "action selection.overlap")
+        weight = (
+            _number(data["temporal_ensemble_weight"], "action selection.temporal_ensemble_weight")
+            if data.get("temporal_ensemble_weight") is not None
+            else None
+        )
+        if weight is not None and not 0 < weight <= 1:
+            raise RobotContractError(
+                "action selection.temporal_ensemble_weight must be in (0, 1]"
+            )
+        if overlap != "temporal_ensemble" and weight is not None:
+            raise RobotContractError(
+                "action selection.temporal_ensemble_weight requires temporal_ensemble overlap"
+            )
+        return cls(
+            execution_horizon=_at_most(
+                _positive_int(
+                    data.get("execution_horizon", 1), "action selection.execution_horizon"
+                ),
+                4096,
+                "action selection.execution_horizon",
+            ),
+            queue_threshold=_at_most(
+                _nonnegative_int(
+                    data.get("queue_threshold", 0), "action selection.queue_threshold"
+                ),
+                4096,
+                "action selection.queue_threshold",
+            ),
+            overlap=overlap,
+            temporal_ensemble_weight=weight,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -853,52 +1047,240 @@ class PolicySpec:
 
 
 @dataclass(frozen=True)
-class EpisodePlan:
-    count: int
+class PolicyDeploymentSpec:
+    schema_version: str
+    deployment_id: str
+    model_id: str
+    source: str
+    runtime_family: str
+    revision: str
+    embodiment_id: str
+    observation_schema: Dict[str, TensorSpec]
+    action_spec: ActionSpec
+    resources: RuntimeResources
+    max_batch_size: int
+    max_horizon: int
+    state_model: str
+    reset_granularity: str
+    deterministic: bool
+    default_action_selection: ActionSelectionSpec
+    checkpoint_ref: Optional[str] = None
+    processor_revision: Optional[str] = None
+    normalization_revision: Optional[str] = None
+    config: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PolicyDeploymentSpec":
+        _strict_keys(
+            data,
+            {
+                "schema_version",
+                "deployment_id",
+                "model_id",
+                "source",
+                "runtime_family",
+                "revision",
+                "embodiment_id",
+                "observation_schema",
+                "action_spec",
+                "resources",
+                "max_batch_size",
+                "max_horizon",
+                "state_model",
+                "reset_granularity",
+                "deterministic",
+                "default_action_selection",
+                "checkpoint_ref",
+                "processor_revision",
+                "normalization_revision",
+                "config",
+                "metadata",
+            },
+            "policy deployment",
+        )
+        _schema(data, POLICY_DEPLOYMENT_SCHEMA_VERSION, "policy deployment")
+        source = _choice(
+            _require(data, "source", "policy deployment"),
+            POLICY_DEPLOYMENT_SOURCES,
+            "policy deployment.source",
+        )
+        config = _mapping(data.get("config", {}), "policy deployment.config")
+        if source == "worldlines" and {"url", "token", "api_key", "factory"} & config.keys():
+            raise RobotContractError(
+                "worldlines policy deployment endpoints and credentials are control-plane resolved"
+            )
+        observation_raw = _mapping(
+            _require(data, "observation_schema", "policy deployment"),
+            "policy deployment.observation_schema",
+        )
+        if not observation_raw:
+            raise RobotContractError("policy deployment.observation_schema must not be empty")
+        max_horizon = _at_most(
+            _positive_int(
+                _require(data, "max_horizon", "policy deployment"),
+                "policy deployment.max_horizon",
+            ),
+            4096,
+            "policy deployment.max_horizon",
+        )
+        default_action_selection = ActionSelectionSpec.from_dict(
+            _mapping(
+                data.get("default_action_selection", {}),
+                "policy deployment.default_action_selection",
+            )
+        )
+        if default_action_selection.execution_horizon > max_horizon:
+            raise RobotContractError(
+                "policy deployment default execution_horizon exceeds max_horizon"
+            )
+        return cls(
+            schema_version=POLICY_DEPLOYMENT_SCHEMA_VERSION,
+            deployment_id=_string(
+                _require(data, "deployment_id", "policy deployment"),
+                "policy deployment.deployment_id",
+            ),
+            model_id=_string(
+                _require(data, "model_id", "policy deployment"),
+                "policy deployment.model_id",
+            ),
+            source=source,
+            runtime_family=_string(
+                _require(data, "runtime_family", "policy deployment"),
+                "policy deployment.runtime_family",
+            ),
+            revision=_string(
+                _require(data, "revision", "policy deployment"),
+                "policy deployment.revision",
+            ),
+            embodiment_id=_string(
+                _require(data, "embodiment_id", "policy deployment"),
+                "policy deployment.embodiment_id",
+            ),
+            observation_schema={
+                str(name): TensorSpec.from_dict(_mapping(spec, f"observation_schema.{name}"))
+                for name, spec in observation_raw.items()
+            },
+            action_spec=ActionSpec.from_dict(
+                _mapping(
+                    _require(data, "action_spec", "policy deployment"),
+                    "policy deployment.action_spec",
+                )
+            ),
+            resources=RuntimeResources.from_dict(
+                _mapping(
+                    _require(data, "resources", "policy deployment"),
+                    "policy deployment.resources",
+                )
+            ),
+            max_batch_size=_at_most(
+                _positive_int(
+                    _require(data, "max_batch_size", "policy deployment"),
+                    "policy deployment.max_batch_size",
+                ),
+                4096,
+                "policy deployment.max_batch_size",
+            ),
+            max_horizon=max_horizon,
+            state_model=_choice(
+                _require(data, "state_model", "policy deployment"),
+                POLICY_STATE_MODELS,
+                "policy deployment.state_model",
+            ),
+            reset_granularity=_choice(
+                _require(data, "reset_granularity", "policy deployment"),
+                POLICY_RESET_GRANULARITIES,
+                "policy deployment.reset_granularity",
+            ),
+            deterministic=_boolean(
+                _require(data, "deterministic", "policy deployment"),
+                "policy deployment.deterministic",
+            ),
+            default_action_selection=default_action_selection,
+            checkpoint_ref=_optional_string(
+                data.get("checkpoint_ref"), "policy deployment.checkpoint_ref"
+            ),
+            processor_revision=_optional_string(
+                data.get("processor_revision"), "policy deployment.processor_revision"
+            ),
+            normalization_revision=_optional_string(
+                data.get("normalization_revision"),
+                "policy deployment.normalization_revision",
+            ),
+            config=config,
+            metadata=_mapping(data.get("metadata", {}), "policy deployment.metadata"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _contract_dict(self)
+
+    def deployment_hash(self) -> str:
+        return runtime_contract_hash(self.to_dict())
+
+
+@dataclass(frozen=True)
+class RolloutSpec:
+    episodes: int
     root_seed: int
     vector_width: int
     max_steps: int
+    control_rate_hz: float
+    action_selection: ActionSelectionSpec
     seeds: List[int] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "EpisodePlan":
+    def from_dict(cls, data: Mapping[str, Any]) -> "RolloutSpec":
         _strict_keys(
             data,
-            {"count", "root_seed", "vector_width", "max_steps", "seeds"},
-            "episode plan",
+            {
+                "episodes",
+                "root_seed",
+                "vector_width",
+                "max_steps",
+                "control_rate_hz",
+                "action_selection",
+                "seeds",
+            },
+            "rollout",
         )
-        count = _at_most(
-            _positive_int(_require(data, "count", "episode plan"), "episode plan.count"),
+        episodes = _at_most(
+            _positive_int(_require(data, "episodes", "rollout"), "rollout.episodes"),
             100_000,
-            "episode plan.count",
+            "rollout.episodes",
         )
         seeds = [
-            _integer(v, "episode plan.seeds[]")
-            for v in _list(data.get("seeds", []), "episode plan.seeds")
+            _integer(v, "rollout.seeds[]")
+            for v in _list(data.get("seeds", []), "rollout.seeds")
         ]
-        if seeds and len(seeds) != count:
+        if seeds and len(seeds) != episodes:
             raise RobotContractError(
-                "episode plan.seeds must be empty or contain exactly count seeds"
+                "rollout.seeds must be empty or contain exactly rollout.episodes seeds"
             )
         return cls(
-            count=count,
+            episodes=episodes,
             root_seed=_integer(
-                _require(data, "root_seed", "episode plan"), "episode plan.root_seed"
+                _require(data, "root_seed", "rollout"), "rollout.root_seed"
             ),
             vector_width=_at_most(
                 _positive_int(
-                    _require(data, "vector_width", "episode plan"),
-                    "episode plan.vector_width",
+                    _require(data, "vector_width", "rollout"), "rollout.vector_width"
                 ),
                 4096,
-                "episode plan.vector_width",
+                "rollout.vector_width",
             ),
             max_steps=_at_most(
                 _positive_int(
-                    _require(data, "max_steps", "episode plan"), "episode plan.max_steps"
+                    _require(data, "max_steps", "rollout"), "rollout.max_steps"
                 ),
                 10_000_000,
-                "episode plan.max_steps",
+                "rollout.max_steps",
+            ),
+            control_rate_hz=_positive_float(
+                _require(data, "control_rate_hz", "rollout"),
+                "rollout.control_rate_hz",
+            ),
+            action_selection=ActionSelectionSpec.from_dict(
+                _mapping(data.get("action_selection", {}), "rollout.action_selection")
             ),
             seeds=seeds,
         )
@@ -907,7 +1289,62 @@ class EpisodePlan:
         return (
             list(self.seeds)
             if self.seeds
-            else [self.root_seed + index for index in range(self.count)]
+            else [self.root_seed + index for index in range(self.episodes)]
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _contract_dict(self)
+
+
+@dataclass(frozen=True)
+class PlacementSpec:
+    topology: str
+    simulator_resources: RuntimeResources
+    policy_resources: RuntimeResources
+    coordinator_resources: RuntimeResources
+    gpu_sharing: bool = False
+    provider: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PlacementSpec":
+        _strict_keys(
+            data,
+            {
+                "topology",
+                "simulator_resources",
+                "policy_resources",
+                "coordinator_resources",
+                "gpu_sharing",
+                "provider",
+            },
+            "placement",
+        )
+        return cls(
+            topology=_choice(
+                _require(data, "topology", "placement"),
+                PLACEMENT_TOPOLOGIES,
+                "placement.topology",
+            ),
+            simulator_resources=RuntimeResources.from_dict(
+                _mapping(
+                    _require(data, "simulator_resources", "placement"),
+                    "placement.simulator_resources",
+                )
+            ),
+            policy_resources=RuntimeResources.from_dict(
+                _mapping(
+                    _require(data, "policy_resources", "placement"),
+                    "placement.policy_resources",
+                )
+            ),
+            coordinator_resources=RuntimeResources.from_dict(
+                _mapping(
+                    _require(data, "coordinator_resources", "placement"),
+                    "placement.coordinator_resources",
+                )
+            ),
+            gpu_sharing=_boolean(data.get("gpu_sharing", False), "placement.gpu_sharing"),
+            provider=_optional_string(data.get("provider"), "placement.provider"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1021,10 +1458,11 @@ class EvaluationSpec:
 class RoboticsJobSpec:
     schema_version: str
     job_name: str
-    environment: EnvironmentPackageSpec
-    policy: PolicySpec
-    episodes: EpisodePlan
-    resources: RuntimeResources
+    simulator: SimulatorPackageSpec
+    task: TaskPackageSpec
+    policy: PolicyDeploymentSpec
+    rollout: RolloutSpec
+    placement: PlacementSpec
     recording: RecordingSpec
     evaluation: EvaluationSpec
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -1036,10 +1474,11 @@ class RoboticsJobSpec:
             {
                 "schema_version",
                 "job_name",
-                "environment",
+                "simulator",
+                "task",
                 "policy",
-                "episodes",
-                "resources",
+                "rollout",
+                "placement",
                 "recording",
                 "evaluation",
                 "metadata",
@@ -1047,35 +1486,112 @@ class RoboticsJobSpec:
             "robotics job",
         )
         _schema(data, ROBOTICS_JOB_SCHEMA_VERSION, "robotics job")
-        environment = EnvironmentPackageSpec.from_dict(
-            _mapping(_require(data, "environment", "robotics job"), "robotics job.environment")
+        simulator = SimulatorPackageSpec.from_dict(
+            _mapping(_require(data, "simulator", "robotics job"), "robotics job.simulator")
         )
-        episodes = EpisodePlan.from_dict(
-            _mapping(_require(data, "episodes", "robotics job"), "robotics job.episodes")
+        task = TaskPackageSpec.from_dict(
+            _mapping(_require(data, "task", "robotics job"), "robotics job.task")
         )
-        if episodes.vector_width > 1 and not environment.supports_vectorization:
+        policy = PolicyDeploymentSpec.from_dict(
+            _mapping(_require(data, "policy", "robotics job"), "robotics job.policy")
+        )
+        rollout = RolloutSpec.from_dict(
+            _mapping(_require(data, "rollout", "robotics job"), "robotics job.rollout")
+        )
+        placement = PlacementSpec.from_dict(
+            _mapping(_require(data, "placement", "robotics job"), "robotics job.placement")
+        )
+        evaluation = EvaluationSpec.from_dict(
+            _mapping(_require(data, "evaluation", "robotics job"), "robotics job.evaluation")
+        )
+        if rollout.vector_width > 1 and not simulator.supports_vectorization:
             raise RobotContractError(
-                "robotics job requests vector_width > 1 for a non-vector environment"
+                "robotics job requests vector_width > 1 for a non-vector simulator"
             )
+        if simulator.package_id not in task.compatible_simulators and simulator.simulator not in task.compatible_simulators:
+            raise RobotContractError("robotics job task is incompatible with the selected simulator")
+        missing_capabilities = sorted(set(task.required_capabilities) - set(simulator.capabilities))
+        if missing_capabilities:
+            raise RobotContractError(
+                f"robotics job simulator is missing task capabilities {missing_capabilities}"
+            )
+        for mount in task.asset_mounts:
+            if not any(
+                mount.mount_path == root or mount.mount_path.startswith(f"{root}/")
+                for root in simulator.mount_roots
+            ):
+                raise RobotContractError(
+                    f"task asset mount {mount.mount_path!r} is outside simulator mount roots"
+                )
+        if task.embodiment_id != policy.embodiment_id:
+            raise RobotContractError("robotics job task and policy embodiment_id must match")
+        if task.action_spec.to_dict() != policy.action_spec.to_dict():
+            raise RobotContractError("robotics job task and policy action specs must match")
+        for name, expected in policy.observation_schema.items():
+            actual = task.observation_schema.get(name)
+            if actual is None or actual.to_dict() != expected.to_dict():
+                raise RobotContractError(
+                    f"robotics job task observation {name!r} does not match policy deployment"
+                )
+        if rollout.vector_width > policy.max_batch_size:
+            raise RobotContractError(
+                "robotics job rollout.vector_width exceeds policy max_batch_size"
+            )
+        if rollout.action_selection.execution_horizon > policy.max_horizon:
+            raise RobotContractError(
+                "robotics job execution_horizon exceeds policy max_horizon"
+            )
+        if rollout.action_selection.execution_horizon > policy.action_spec.horizon:
+            raise RobotContractError(
+                "robotics job execution_horizon exceeds the policy action-spec horizon"
+            )
+        if not math.isclose(
+            rollout.control_rate_hz,
+            task.action_spec.control_hz,
+            rel_tol=0,
+            abs_tol=1e-9,
+        ):
+            raise RobotContractError(
+                "robotics job rollout.control_rate_hz must match the task action control_hz"
+            )
+        required_metrics = {check.metric for check in evaluation.checks.values()}
+        missing_metrics = sorted(required_metrics - set(task.native_metrics))
+        if missing_metrics:
+            raise RobotContractError(
+                f"robotics job evaluation references undeclared task metrics {missing_metrics}"
+            )
+        _validate_resources_cover(
+            placement.simulator_resources,
+            simulator.resources,
+            "placement.simulator_resources",
+        )
+        _validate_resources_cover(
+            placement.policy_resources,
+            policy.resources,
+            "placement.policy_resources",
+        )
+        if placement.gpu_sharing:
+            gpu_types = {
+                item.gpu_type
+                for item in (placement.simulator_resources, placement.policy_resources)
+                if item.gpu_count > 0 and item.gpu_type is not None
+            }
+            if len(gpu_types) > 1:
+                raise RobotContractError(
+                    "robotics job shared simulator/policy GPUs require compatible gpu_type values"
+                )
         return cls(
             schema_version=ROBOTICS_JOB_SCHEMA_VERSION,
             job_name=_string(_require(data, "job_name", "robotics job"), "robotics job.job_name"),
-            environment=environment,
-            policy=PolicySpec.from_dict(
-                _mapping(_require(data, "policy", "robotics job"), "robotics job.policy")
-            ),
-            episodes=episodes,
-            resources=RuntimeResources.from_dict(
-                _mapping(
-                    data.get("resources", environment.resources.to_dict()), "robotics job.resources"
-                )
-            ),
+            simulator=simulator,
+            task=task,
+            policy=policy,
+            rollout=rollout,
+            placement=placement,
             recording=RecordingSpec.from_dict(
                 _mapping(data.get("recording", {}), "robotics job.recording")
             ),
-            evaluation=EvaluationSpec.from_dict(
-                _mapping(_require(data, "evaluation", "robotics job"), "robotics job.evaluation")
-            ),
+            evaluation=evaluation,
             metadata=_mapping(data.get("metadata", {}), "robotics job.metadata"),
         )
 
@@ -1083,7 +1599,46 @@ class RoboticsJobSpec:
         return _contract_dict(self)
 
     def job_hash(self) -> str:
-        return stable_hash(self.to_dict())
+        return runtime_contract_hash(self.to_dict())
+
+    def runtime_resources(self) -> RuntimeResources:
+        simulator = self.placement.simulator_resources
+        policy = self.placement.policy_resources
+        coordinator = self.placement.coordinator_resources
+        gpu_count = coordinator.gpu_count + (
+            max(simulator.gpu_count, policy.gpu_count)
+            if self.placement.gpu_sharing
+            else simulator.gpu_count + policy.gpu_count
+        )
+        gpu_types = {
+            item.gpu_type
+            for item in (simulator, policy, coordinator)
+            if item.gpu_count > 0 and item.gpu_type is not None
+        }
+        shm_values = [
+            item.shm_size_gb
+            for item in (simulator, policy, coordinator)
+            if item.shm_size_gb is not None
+        ]
+        return RuntimeResources.from_dict(
+            {
+                "cpu_cores": simulator.cpu_cores
+                + policy.cpu_cores
+                + coordinator.cpu_cores,
+                "memory_gb": simulator.memory_gb
+                + policy.memory_gb
+                + coordinator.memory_gb,
+                "disk_gb": simulator.disk_gb + policy.disk_gb + coordinator.disk_gb,
+                "gpu_count": gpu_count,
+                "timeout_seconds": max(
+                    simulator.timeout_seconds,
+                    policy.timeout_seconds,
+                    coordinator.timeout_seconds,
+                ),
+                **({"gpu_type": next(iter(gpu_types))} if len(gpu_types) == 1 else {}),
+                **({"shm_size_gb": max(shm_values)} if shm_values else {}),
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -1094,15 +1649,19 @@ class EpisodeManifest:
     seed: int
     status: str
     job_hash: str
-    environment_package_hash: str
-    policy_id: str
+    simulator_package_hash: str
+    task_package_hash: str
+    policy_deployment_hash: str
+    policy_deployment_id: str
     policy_revision: str
-    runtime_image: str
+    simulator_image: str
     step_count: int
     metrics: Dict[str, Any]
     artifacts: List[ArtifactRef]
     started_at: str
     finished_at: str
+    requested_placement: Dict[str, Any]
+    actual_placement: Dict[str, Any]
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     runtime_metadata: Dict[str, Any] = field(default_factory=dict)
@@ -1118,15 +1677,19 @@ class EpisodeManifest:
                 "seed",
                 "status",
                 "job_hash",
-                "environment_package_hash",
-                "policy_id",
+                "simulator_package_hash",
+                "task_package_hash",
+                "policy_deployment_hash",
+                "policy_deployment_id",
                 "policy_revision",
-                "runtime_image",
+                "simulator_image",
                 "step_count",
                 "metrics",
                 "artifacts",
                 "started_at",
                 "finished_at",
+                "requested_placement",
+                "actual_placement",
                 "error_code",
                 "error_message",
                 "runtime_metadata",
@@ -1134,6 +1697,14 @@ class EpisodeManifest:
             "episode manifest",
         )
         _schema(data, EPISODE_MANIFEST_SCHEMA_VERSION, "episode manifest")
+        simulator_image = _string(
+            _require(data, "simulator_image", "episode manifest"),
+            "episode manifest.simulator_image",
+        )
+        if not _IMAGE_DIGEST_RE.fullmatch(simulator_image):
+            raise RobotContractError(
+                "episode manifest.simulator_image must be pinned by an OCI sha256 digest"
+            )
         return cls(
             schema_version=EPISODE_MANIFEST_SCHEMA_VERSION,
             run_id=_string(_require(data, "run_id", "episode manifest"), "episode manifest.run_id"),
@@ -1149,21 +1720,27 @@ class EpisodeManifest:
             job_hash=_sha256(
                 _require(data, "job_hash", "episode manifest"), "episode manifest.job_hash"
             ),
-            environment_package_hash=_sha256(
-                _require(data, "environment_package_hash", "episode manifest"),
-                "episode manifest.environment_package_hash",
+            simulator_package_hash=_sha256(
+                _require(data, "simulator_package_hash", "episode manifest"),
+                "episode manifest.simulator_package_hash",
             ),
-            policy_id=_string(
-                _require(data, "policy_id", "episode manifest"), "episode manifest.policy_id"
+            task_package_hash=_sha256(
+                _require(data, "task_package_hash", "episode manifest"),
+                "episode manifest.task_package_hash",
+            ),
+            policy_deployment_hash=_sha256(
+                _require(data, "policy_deployment_hash", "episode manifest"),
+                "episode manifest.policy_deployment_hash",
+            ),
+            policy_deployment_id=_string(
+                _require(data, "policy_deployment_id", "episode manifest"),
+                "episode manifest.policy_deployment_id",
             ),
             policy_revision=_string(
                 _require(data, "policy_revision", "episode manifest"),
                 "episode manifest.policy_revision",
             ),
-            runtime_image=_string(
-                _require(data, "runtime_image", "episode manifest"),
-                "episode manifest.runtime_image",
-            ),
+            simulator_image=simulator_image,
             step_count=_nonnegative_int(
                 _require(data, "step_count", "episode manifest"),
                 "episode manifest.step_count",
@@ -1178,6 +1755,14 @@ class EpisodeManifest:
             ),
             finished_at=_string(
                 _require(data, "finished_at", "episode manifest"), "episode manifest.finished_at"
+            ),
+            requested_placement=_mapping(
+                _require(data, "requested_placement", "episode manifest"),
+                "episode manifest.requested_placement",
+            ),
+            actual_placement=_mapping(
+                _require(data, "actual_placement", "episode manifest"),
+                "episode manifest.actual_placement",
             ),
             error_code=_optional_string(data.get("error_code"), "episode manifest.error_code"),
             error_message=_optional_string(

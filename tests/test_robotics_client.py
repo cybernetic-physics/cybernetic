@@ -58,7 +58,7 @@ def test_submit_get_and_cancel_robotics_run() -> None:
 
     payload = json.loads(create.calls[0].request.content)
     assert payload["job"]["schema_version"] == "robotics-job/v1"
-    assert "gpu_type" not in payload["job"]["resources"]
+    assert "gpu_type" not in payload["job"]["placement"]["simulator_resources"]
     assert payload["budgetUsdLimit"] == 3.5
     assert get.called and cancel.called
 
