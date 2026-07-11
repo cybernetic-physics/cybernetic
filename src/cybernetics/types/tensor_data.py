@@ -35,17 +35,26 @@ class TensorData(StrictBase):
 
     @classmethod
     def from_numpy(cls, array: npt.NDArray[Any]) -> "TensorData":
+        wire_dtype = _convert_numpy_dtype_to_tensor(array.dtype)
+        wire_array = array.astype(
+            np.float32 if wire_dtype == "float32" else np.int64,
+            copy=False,
+        )
         return cls(
-            data=array.flatten().tolist(),
-            dtype=_convert_numpy_dtype_to_tensor(array.dtype),
+            data=wire_array.flatten().tolist(),
+            dtype=wire_dtype,
             shape=list(array.shape),
         )
 
     @classmethod
     def from_torch(cls, tensor: "torch.Tensor") -> "TensorData":
+        wire_dtype = _convert_torch_dtype_to_tensor(tensor.dtype)
+        wire_tensor = tensor.to(
+            dtype=torch.float32 if wire_dtype == "float32" else torch.int64
+        )
         return cls(
-            data=tensor.flatten().tolist(),
-            dtype=_convert_torch_dtype_to_tensor(tensor.dtype),
+            data=wire_tensor.flatten().tolist(),
+            dtype=wire_dtype,
             shape=list(tensor.shape),
         )
 
@@ -99,7 +108,7 @@ def _convert_numpy_dtype_to_tensor(dtype: np.dtype[Any]) -> TensorDtype:
     """Convert numpy dtype to TensorDtype."""
     if dtype.kind == "f":
         return "float32"
-    elif dtype.kind == "i":
+    elif dtype.kind in {"b", "i", "u"}:
         return "int64"
     else:
         raise ValueError(f"Unsupported numpy dtype: {dtype}")

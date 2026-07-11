@@ -215,10 +215,10 @@ continuous artifacts from the response:
 ```python
 sampler = service_client.create_sampling_client(base_model="dreamzero-droid")
 conditioning = {
-    "images": types.TensorData(data=[...], dtype="int64", shape=[1, 3, 176, 320, 3]),
-    "state": types.TensorData(data=[...], dtype="float32", shape=[1, 1, 64]),
-    "state_mask": types.TensorData(data=[1], dtype="int64", shape=[1]),
-    "embodiment_id": types.TensorData(data=[0], dtype="int64", shape=[1]),
+    "images": types.TensorData.from_numpy(rgb_frames),       # uint8 [B,T,H,W,3]
+    "state": types.TensorData.from_numpy(proprio_state),     # float32 [B,T,D]
+    "state_mask": types.TensorData.from_numpy(state_mask),   # bool [B,T,D]
+    "embodiment_id": types.TensorData.from_numpy(embodiment),# int64 [B]
 }
 result = sampler.sample(
     types.ModelInput.empty(),
