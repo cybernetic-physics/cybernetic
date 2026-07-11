@@ -61,19 +61,25 @@ class _SampleRPC(SidecarRPC):
 
     prompt: types.ModelInput
     conditioning: types.PolicyConditioning | None
+    droid_observation: types.DroidObservation | None
     num_samples: int
     sampling_params: types.SamplingParams
     include_prompt_logprobs: bool
     topk_prompt_logprobs: int
+    policy_mode: Literal["native", "sde"] | None = None
+    include_predicted_video: bool = False
 
     async def execute(self, target: Any) -> Any:
         return target.sample(
             prompt=self.prompt,
             conditioning=self.conditioning,
+            droid_observation=self.droid_observation,
             num_samples=self.num_samples,
             sampling_params=self.sampling_params,
             include_prompt_logprobs=self.include_prompt_logprobs,
             topk_prompt_logprobs=self.topk_prompt_logprobs,
+            policy_mode=self.policy_mode,
+            include_predicted_video=self.include_predicted_video,
         )
 
 
@@ -247,22 +253,30 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         include_prompt_logprobs: bool,
         topk_prompt_logprobs: int,
         *,
+        request_id: int,
+        droid_observation: types.DroidObservation | None = None,
+        policy_mode: Literal["native", "sde"] | None = None,
+        include_predicted_video: bool = False,
         request_kind: Literal["sample", "compute_logprobs"] = "sample",
     ):
         try:
-            request_id = self._request_id_counter
-            self._request_id_counter += 1
-            request = types.SampleRequest(
-                sampling_session_id=self._sampling_session_id,
-                seq_id=request_id,
-                num_samples=num_samples,
-                prompt=prompt,
-                conditioning=conditioning,
-                sampling_params=sampling_params,
-                prompt_logprobs=include_prompt_logprobs,
-                topk_prompt_logprobs=topk_prompt_logprobs,
-                completion_logprobs=bool(getattr(sampling_params, "completion_logprobs", False)),
-            )
+            request_kwargs: dict[str, Any] = {
+                "sampling_session_id": self._sampling_session_id,
+                "seq_id": request_id,
+                "num_samples": num_samples,
+                "prompt": prompt,
+                "conditioning": conditioning,
+                "droid_observation": droid_observation,
+                "sampling_params": sampling_params,
+                "prompt_logprobs": include_prompt_logprobs,
+                "topk_prompt_logprobs": topk_prompt_logprobs,
+                "completion_logprobs": bool(getattr(sampling_params, "completion_logprobs", False)),
+            }
+            if policy_mode is not None:
+                request_kwargs["policy_mode"] = policy_mode
+            if include_predicted_video:
+                request_kwargs["include_predicted_video"] = True
+            request = types.SampleRequest(**request_kwargs)
             extra_headers = await self.holder.sample_request_extra_headers(
                 request_kind=request_kind
             )
@@ -291,9 +305,24 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         include_prompt_logprobs: bool,
         topk_prompt_logprobs: int = 0,
         *,
+        request_id: int,
+        droid_observation: types.DroidObservation | None = None,
+        policy_mode: Literal["native", "sde"] | None = None,
+        include_predicted_video: bool = False,
         request_kind: Literal["sample", "compute_logprobs"] = "sample",
     ) -> types.SampleResponse:
         estimated_bytes_count = self.holder.estimate_bytes_count_in_model_input(prompt)
+        if droid_observation is not None:
+            estimated_bytes_count += sum(
+                len(tensor.data) * 8
+                for tensor in (
+                    droid_observation.exterior_image_0_left,
+                    droid_observation.exterior_image_1_left,
+                    droid_observation.wrist_image_left,
+                    droid_observation.joint_position,
+                    droid_observation.gripper_position,
+                )
+            )
         async with self.holder.sample_request_rate_limit(
             estimated_bytes_count, request_kind=request_kind
         ):
@@ -313,6 +342,10 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                     sampling_params,
                     include_prompt_logprobs,
                     topk_prompt_logprobs,
+                    request_id=request_id,
+                    droid_observation=droid_observation,
+                    policy_mode=policy_mode,
+                    include_predicted_video=include_predicted_video,
                     request_kind=request_kind,
                 )
                 if untyped_future is not None:
@@ -354,6 +387,9 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         include_prompt_logprobs: bool = False,
         topk_prompt_logprobs: int = 0,
         conditioning: types.PolicyConditioning | None = None,
+        droid_observation: types.DroidObservation | None = None,
+        policy_mode: Literal["native", "sde"] | None = None,
+        include_predicted_video: bool = False,
     ) -> ConcurrentFuture[types.SampleResponse]:
         """Generate token completions or continuous-policy rollout artifacts.
 
@@ -361,6 +397,12 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         - `prompt`: Optional input tokens as ModelInput
         - `conditioning`: Optional continuous-policy tensors such as DreamZero
           RGB/state/mask/embodiment inputs.
+        - `droid_observation`: Raw three-camera DROID observation. The hosted
+          DreamZero backend owns its transforms and returns robot-space actions.
+        - `policy_mode`: `native` for causal joint action/video serving or `sde`
+          for a recorded RL trajectory.
+        - `include_predicted_video`: Return one bounded video latent from the
+          native joint pass. SDE rollouts leave video disabled.
         - `num_samples`: Number of independent samples to generate
         - `sampling_params`: Parameters controlling generation (temperature, max_tokens, etc.)
         - `include_prompt_logprobs`: Whether to include log probabilities for prompt tokens
@@ -379,17 +421,26 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
             print(tokenizer.decode(sample.tokens))
         ```
         """
+        if conditioning is not None and droid_observation is not None:
+            raise ValueError("conditioning and droid_observation are mutually exclusive")
+
         if self._sampling_client_sidecar_handle is not None:
             return self._sampling_client_sidecar_handle.submit_rpc(
                 _SampleRPC(
                     prompt=prompt,
                     conditioning=conditioning,
+                    droid_observation=droid_observation,
                     num_samples=num_samples,
                     sampling_params=sampling_params,
                     include_prompt_logprobs=include_prompt_logprobs,
                     topk_prompt_logprobs=topk_prompt_logprobs,
+                    policy_mode=policy_mode,
+                    include_predicted_video=include_predicted_video,
                 )
             )
+
+        request_id = self._request_id_counter
+        self._request_id_counter += 1
 
         async def _sample_async():
             return await self._sample_async_impl(
@@ -399,6 +450,10 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 sampling_params,
                 include_prompt_logprobs,
                 topk_prompt_logprobs,
+                request_id=request_id,
+                droid_observation=droid_observation,
+                policy_mode=policy_mode,
+                include_predicted_video=include_predicted_video,
             )
 
         @capture_exceptions(fatal=True)
@@ -416,16 +471,63 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         include_prompt_logprobs: bool = False,
         topk_prompt_logprobs: int = 0,
         conditioning: types.PolicyConditioning | None = None,
+        droid_observation: types.DroidObservation | None = None,
+        policy_mode: Literal["native", "sde"] | None = None,
+        include_predicted_video: bool = False,
     ) -> types.SampleResponse:
         """Async version of sample."""
         return await AwaitableConcurrentFuture(
             self.sample(
-                prompt,
-                num_samples,
-                sampling_params,
-                include_prompt_logprobs,
-                topk_prompt_logprobs,
-                conditioning,
+                prompt=prompt,
+                num_samples=num_samples,
+                sampling_params=sampling_params,
+                include_prompt_logprobs=include_prompt_logprobs,
+                topk_prompt_logprobs=topk_prompt_logprobs,
+                conditioning=conditioning,
+                droid_observation=droid_observation,
+                policy_mode=policy_mode,
+                include_predicted_video=include_predicted_video,
+            )
+        )
+
+    def sample_droid(
+        self,
+        observation: types.DroidObservation,
+        *,
+        policy_mode: Literal["native", "sde"] = "native",
+        include_predicted_video: bool = False,
+        seed: int | None = None,
+    ) -> ConcurrentFuture[types.SampleResponse]:
+        """Sample DreamZero from a raw DROID observation.
+
+        The result's `action_chunk` is in DROID robot space with seven joint
+        positions followed by one gripper value. Native mode is intended for
+        environment control; SDE mode additionally records flow-RL artifacts.
+        """
+        return self.sample(
+            prompt=types.ModelInput.empty(),
+            droid_observation=observation,
+            num_samples=1,
+            sampling_params=types.SamplingParams(max_tokens=1, seed=seed),
+            policy_mode=policy_mode,
+            include_predicted_video=include_predicted_video,
+        )
+
+    async def sample_droid_async(
+        self,
+        observation: types.DroidObservation,
+        *,
+        policy_mode: Literal["native", "sde"] = "native",
+        include_predicted_video: bool = False,
+        seed: int | None = None,
+    ) -> types.SampleResponse:
+        """Async version of :meth:`sample_droid`."""
+        return await AwaitableConcurrentFuture(
+            self.sample_droid(
+                observation,
+                policy_mode=policy_mode,
+                include_predicted_video=include_predicted_video,
+                seed=seed,
             )
         )
 
@@ -455,6 +557,9 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 _ComputeLogprobsRPC(prompt=prompt)
             )
 
+        request_id = self._request_id_counter
+        self._request_id_counter += 1
+
         async def _compute_logprobs_async() -> list[float | None]:
             sample_res = await self._sample_async_impl(
                 prompt,
@@ -462,6 +567,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 num_samples=1,
                 sampling_params=types.SamplingParams(max_tokens=1),
                 include_prompt_logprobs=True,
+                request_id=request_id,
                 request_kind="compute_logprobs",
             )
             return cast(list[float | None], sample_res.prompt_logprobs)

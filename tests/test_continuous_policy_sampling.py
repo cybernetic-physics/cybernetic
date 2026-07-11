@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
+from types import SimpleNamespace
+
 import numpy as np
 
 from cybernetics import types
 from cybernetics._compat import model_dump
 from cybernetics._models import construct_type
+from cybernetics.lib.public_interfaces.sampling_client import SamplingClient
 from cybernetics.resources.service import _model_dump_omit_none
 
 
@@ -34,6 +39,8 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
         sampling_session_id="wlss_123",
         seq_id=7,
         sampling_params=types.SamplingParams(max_tokens=1),
+        policy_mode="native",
+        include_predicted_video=True,
         conditioning={
             "images": _tensor([0, 1, 2], "int64", [1, 1, 1, 3]),
             "state": _tensor([0.5, -0.5], "float32", [1, 2]),
@@ -47,6 +54,92 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
     assert body.get("prompt", {"chunks": []}) == {"chunks": []}
     assert body["conditioning"]["images"]["shape"] == [1, 1, 1, 3]
     assert body["conditioning"]["state"]["data"] == [0.5, -0.5]
+    assert body["policy_mode"] == "native"
+    assert body["include_predicted_video"] is True
+
+
+def test_raw_droid_observation_is_typed_and_sample_droid_is_ergonomic() -> None:
+    observation = types.DroidObservation.from_numpy(
+        exterior_image_0_left=np.zeros((2, 3, 3), dtype=np.uint8),
+        exterior_image_1_left=np.ones((2, 3, 3), dtype=np.uint8),
+        wrist_image_left=np.full((2, 3, 3), 2, dtype=np.uint8),
+        joint_position=np.arange(7, dtype=np.float32),
+        gripper_position=0.25,
+        instruction="pick up the object",
+    )
+    observed: dict[str, object] = {}
+
+    class _Client:
+        def sample(self, **kwargs):
+            observed.update(kwargs)
+            return "future"
+
+    result = SamplingClient.sample_droid(  # type: ignore[arg-type]
+        _Client(),
+        observation,
+        include_predicted_video=True,
+        seed=7,
+    )
+
+    assert result == "future"
+    assert observed["prompt"] == types.ModelInput.empty()
+    assert observed["droid_observation"] == observation
+    assert observed["policy_mode"] == "native"
+    assert observed["include_predicted_video"] is True
+    assert observed["sampling_params"].seed == 7  # type: ignore[union-attr]
+    body = model_dump(observation, mode="json")
+    assert body["exterior_image_0_left"]["shape"] == [2, 3, 3]
+    assert body["joint_position"]["shape"] == [7]
+    assert body["instruction"] == "pick up the object"
+
+
+def test_sampling_client_carries_policy_mode_and_video_request() -> None:
+    observed_requests: list[types.SampleRequest] = []
+
+    class _FakeSamplingAPI:
+        async def asample(self, **kwargs):
+            observed_requests.append(kwargs["request"])
+            return SimpleNamespace(request_id="req-policy")
+
+    class _FakeClient:
+        sampling = _FakeSamplingAPI()
+
+    class _FakeHolder:
+        async def sample_request_extra_headers(self, *, request_kind="sample"):
+            assert request_kind == "sample"
+            return {}
+
+        def aclient(self, client_pool_type):
+            @contextmanager
+            def _ctx():
+                yield _FakeClient()
+
+            return _ctx()
+
+    client = object.__new__(SamplingClient)
+    client.holder = _FakeHolder()
+    client._sampling_session_id = "sample-policy"
+    client._request_id_counter = 0
+    client._last_queue_state_logged = 0
+
+    result = asyncio.run(
+        client._send_asample_request(
+            1,
+            types.ModelInput.empty(),
+            None,
+            types.SamplingParams(max_tokens=1),
+            False,
+            0,
+            request_id=17,
+            policy_mode="native",
+            include_predicted_video=True,
+        )
+    )
+
+    assert result.request_id == "req-policy"
+    assert observed_requests[0].seq_id == 17
+    assert observed_requests[0].policy_mode == "native"
+    assert observed_requests[0].include_predicted_video is True
 
 
 def test_tensor_data_accepts_natural_rgb_and_mask_numpy_dtypes() -> None:
