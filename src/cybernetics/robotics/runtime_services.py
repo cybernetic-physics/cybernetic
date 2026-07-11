@@ -259,11 +259,7 @@ class SimulatorServiceClient(Protocol):
 class PolicyServiceClient(Protocol):
     def describe(self) -> PolicyServiceDescriptor: ...
 
-    def reset(
-        self,
-        indices: Sequence[int] | None = None,
-        seeds: Sequence[int] | None = None,
-    ) -> None: ...
+    def reset(self, indices: Sequence[int] | None = None) -> None: ...
 
     def act(
         self,
