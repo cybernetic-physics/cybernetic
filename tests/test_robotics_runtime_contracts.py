@@ -9,12 +9,17 @@ from typing import Any, Mapping
 import pytest
 
 from cybernetics.robotics import (
+    POLICY_SERVICE_PROTOCOL_VERSION,
+    SIM_SERVICE_PROTOCOL_VERSION,
     ActionChunk,
     AssetBundleRef,
     AssetMountSpec,
+    PolicyServiceDescriptor,
     RobotContractError,
     RoboticsJobSpec,
+    RobotServiceContractError,
     SimulatorPackageSpec,
+    SimulatorServiceDescriptor,
     TaskPackageSpec,
 )
 
@@ -218,6 +223,53 @@ def test_robotics_job_round_trips_and_resolves_seed_tree() -> None:
     assert "units" not in job.to_dict()["task"]["action_spec"]["tensor"]
 
 
+def test_runtime_service_descriptors_round_trip_without_transport_dependencies() -> None:
+    job = RoboticsJobSpec.from_dict(job_dict())
+    simulator = SimulatorServiceDescriptor.from_dict(
+        {
+            "protocol_version": SIM_SERVICE_PROTOCOL_VERSION,
+            "session_id": "sim_fixture",
+            "simulator_package_hash": job.simulator.package_hash(),
+            "task_package_hash": job.task.package_hash(),
+            "vector_width": job.rollout.vector_width,
+            "capabilities": job.simulator.capabilities,
+            "observation_schema": {
+                name: spec.to_dict() for name, spec in job.task.observation_schema.items()
+            },
+            "action_spec": job.task.action_spec.to_dict(),
+            "transport": "unix_msgpack_v1",
+        }
+    )
+    policy = PolicyServiceDescriptor.from_dict(
+        {
+            "protocol_version": POLICY_SERVICE_PROTOCOL_VERSION,
+            "session_id": "pol_fixture",
+            "policy_deployment_hash": job.policy.deployment_hash(),
+            "policy_deployment_id": job.policy.deployment_id,
+            "policy_revision": job.policy.revision,
+            "batch_size": job.rollout.vector_width,
+            "max_horizon": job.policy.max_horizon,
+            "state_model": job.policy.state_model,
+            "reset_granularity": job.policy.reset_granularity,
+            "deterministic": job.policy.deterministic,
+            "observation_schema": {
+                name: spec.to_dict() for name, spec in job.policy.observation_schema.items()
+            },
+            "action_spec": job.policy.action_spec.to_dict(),
+            "transport": "unix_msgpack_v1",
+        }
+    )
+
+    assert SimulatorServiceDescriptor.from_dict(simulator.to_dict()) == simulator
+    assert PolicyServiceDescriptor.from_dict(policy.to_dict()) == policy
+    with pytest.raises(RobotServiceContractError, match="protocol_version"):
+        SimulatorServiceDescriptor.from_dict(
+            {**simulator.to_dict(), "protocol_version": "sim-service/v2"}
+        )
+    with pytest.raises(RobotServiceContractError, match="unknown fields"):
+        PolicyServiceDescriptor.from_dict({**policy.to_dict(), "endpoint_url": "hidden"})
+
+
 def test_robotics_job_v1_has_cross_language_canonical_hash_and_composed_boundaries() -> None:
     job = RoboticsJobSpec.from_dict(job_dict())
     serialized = job.to_dict()
@@ -265,6 +317,14 @@ def test_non_vector_environment_rejects_vector_job() -> None:
     data["rollout"]["vector_width"] = 2
 
     with pytest.raises(RobotContractError, match="non-vector"):
+        RoboticsJobSpec.from_dict(data)
+
+
+def test_discrete_policy_rejects_temporal_action_ensemble() -> None:
+    data = job_dict()
+    data["rollout"]["action_selection"]["overlap"] = "temporal_ensemble"
+
+    with pytest.raises(RobotContractError, match="continuous actions"):
         RoboticsJobSpec.from_dict(data)
 
 

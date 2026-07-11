@@ -1545,6 +1545,17 @@ class RoboticsJobSpec:
             raise RobotContractError(
                 "robotics job execution_horizon exceeds the policy action-spec horizon"
             )
+        if (
+            rollout.action_selection.overlap == "temporal_ensemble"
+            and (
+                policy.action_spec.representation == "discrete"
+                or policy.action_spec.tensor.dtype
+                not in {"bfloat16", "float", "float16", "float32", "float64"}
+            )
+        ):
+            raise RobotContractError(
+                "robotics job temporal_ensemble requires floating-point continuous actions"
+            )
         if not math.isclose(
             rollout.control_rate_hz,
             task.action_spec.control_hz,
