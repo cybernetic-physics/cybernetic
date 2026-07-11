@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import numpy as np
+
 from cybernetics import types
 from cybernetics._compat import model_dump
 from cybernetics._models import construct_type
@@ -45,6 +47,17 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
     assert body.get("prompt", {"chunks": []}) == {"chunks": []}
     assert body["conditioning"]["images"]["shape"] == [1, 1, 1, 3]
     assert body["conditioning"]["state"]["data"] == [0.5, -0.5]
+
+
+def test_tensor_data_accepts_natural_rgb_and_mask_numpy_dtypes() -> None:
+    images = types.TensorData.from_numpy(np.array([0, 127, 255], dtype=np.uint8))
+    mask = types.TensorData.from_numpy(np.array([True, False], dtype=bool))
+
+    assert images.dtype == "int64"
+    assert images.data == [0, 127, 255]
+    assert images.to_numpy().dtype == np.int64
+    assert mask.dtype == "int64"
+    assert mask.data == [1, 0]
 
 
 def test_sample_response_preserves_continuous_policy_artifacts() -> None:
