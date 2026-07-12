@@ -5,6 +5,7 @@ from typing_extensions import Literal
 
 from .._compat import PYDANTIC_V2, ConfigDict
 from .._models import StrictBase
+from .droid_observation import DroidObservation
 from .model_input import ModelInput
 from .policy_conditioning import PolicyConditioning
 from .sampling_params import SamplingParams
@@ -30,6 +31,15 @@ class SampleRequest(StrictBase):
     DreamZero expects RGB frames, proprioceptive state, masks, and embodiment
     conditioning at this boundary. Token-only samplers ignore this field.
     """
+
+    droid_observation: Optional[DroidObservation] = None
+    """Raw DROID observation for server-owned DreamZero policy transforms."""
+
+    policy_mode: Optional[Literal["native", "sde"]] = None
+    """Continuous-policy mode: native causal serving or recorded SDE rollout."""
+
+    include_predicted_video: bool = False
+    """Return one bounded predicted-video latent from the native joint pass."""
 
     sampling_params: SamplingParams
 

@@ -31,6 +31,7 @@ from .custom_loss_v2 import Layout as Layout
 from .custom_loss_v2 import LossInputName as LossInputName
 from .custom_loss_v2 import RequestedLossInputs as RequestedLossInputs
 from .datum import Datum as Datum
+from .droid_observation import DroidObservation as DroidObservation
 from .encoded_text_chunk import EncodedTextChunk as EncodedTextChunk
 from .event_type import EventType as EventType
 from .forward_backward_input import ForwardBackwardInput as ForwardBackwardInput
