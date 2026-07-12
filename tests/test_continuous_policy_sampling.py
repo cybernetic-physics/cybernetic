@@ -1,20 +1,71 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
+import pytest
+from pydantic import ValidationError
 
 from cybernetics import types
 from cybernetics._compat import model_dump
 from cybernetics._models import construct_type
+from cybernetics.lib.public_interfaces.api_future import AwaitableConcurrentFuture
 from cybernetics.lib.public_interfaces.sampling_client import SamplingClient
 from cybernetics.resources.service import _model_dump_omit_none
 
 
 def _tensor(data: list[int] | list[float], dtype: str, shape: list[int]) -> types.TensorData:
     return types.TensorData(data=data, dtype=dtype, shape=shape)
+
+
+def test_compute_logprobs_omits_continuous_policy_conditioning() -> None:
+    observed_request_kinds: list[str] = []
+
+    class _FakeRetryHandler:
+        async def execute(self, coro_func):
+            return await coro_func()
+
+    class _FakeHolder:
+        def get_telemetry(self):
+            return None
+
+        def run_coroutine_threadsafe(self, coro):
+            future: Future[list[float | None]] = Future()
+            future.set_result(asyncio.run(coro))
+            return AwaitableConcurrentFuture(future)
+
+    client = object.__new__(SamplingClient)
+    client.holder = _FakeHolder()
+    client.retry_handler = _FakeRetryHandler()
+    client._sampling_client_sidecar_handle = None
+    client._request_id_counter = 0
+
+    async def _fake_sample_async_impl(
+        self,
+        prompt,
+        conditioning,
+        num_samples,
+        sampling_params,
+        include_prompt_logprobs,
+        topk_prompt_logprobs=0,
+        *,
+        request_id,
+        request_kind="sample",
+    ):
+        assert conditioning is None
+        assert request_id == 0
+        observed_request_kinds.append(request_kind)
+        return SimpleNamespace(prompt_logprobs=[0.1, 0.2])
+
+    client._sample_async_impl = MethodType(_fake_sample_async_impl, client)
+
+    result = client.compute_logprobs(types.ModelInput.from_ints([1, 2])).result()
+
+    assert result == [0.1, 0.2]
+    assert observed_request_kinds == ["compute_logprobs"]
 
 
 def test_create_sampling_session_omits_null_model_path_for_base_model() -> None:
@@ -42,11 +93,18 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
         policy_mode="native",
         include_predicted_video=True,
         conditioning={
+            "instruction": types.TextData(data=["turn left"], dtype="utf8", shape=[1, 1]),
             "images": _tensor([0, 1, 2], "int64", [1, 1, 1, 3]),
             "state": _tensor([0.5, -0.5], "float32", [1, 2]),
             "state_mask": _tensor([1], "int64", [1]),
             "embodiment_id": _tensor([0], "int64", [1]),
         },
+        policy_context=types.PolicySessionContext(
+            sequence_ids=["episode-000001"],
+            step_ids=[7],
+            reset_mask=[True],
+            seeds=[41],
+        ),
     )
 
     body = model_dump(request, exclude_unset=True, mode="json")
@@ -56,6 +114,17 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
     assert body["conditioning"]["state"]["data"] == [0.5, -0.5]
     assert body["policy_mode"] == "native"
     assert body["include_predicted_video"] is True
+    assert body["conditioning"]["instruction"] == {
+        "data": ["turn left"],
+        "dtype": "utf8",
+        "shape": [1, 1],
+    }
+    assert body["policy_context"] == {
+        "sequence_ids": ["episode-000001"],
+        "step_ids": [7],
+        "reset_mask": [True],
+        "seeds": [41],
+    }
 
 
 def test_raw_droid_observation_is_typed_and_sample_droid_is_ergonomic() -> None:
@@ -140,6 +209,40 @@ def test_sampling_client_carries_policy_mode_and_video_request() -> None:
     assert observed_requests[0].seq_id == 17
     assert observed_requests[0].policy_mode == "native"
     assert observed_requests[0].include_predicted_video is True
+
+
+def test_policy_session_context_rejects_mismatched_lanes() -> None:
+    with pytest.raises(ValidationError, match="must match sequence_ids length"):
+        types.PolicySessionContext(
+            sequence_ids=["lane-0", "lane-1"],
+            step_ids=[0],
+            reset_mask=[True, True],
+            seeds=[10, 11],
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sequence_ids", [], "1..4096 lanes"),
+        ("sequence_ids", ["x" * 257], "at most 256 characters"),
+        ("step_ids", [-1], "JSON-safe integers"),
+        ("seeds", [2**53], "JSON-safe integers"),
+    ],
+)
+def test_policy_session_context_bounds_hosted_state_keys(
+    field: str, value: list[object], message: str
+) -> None:
+    context = {
+        "sequence_ids": ["lane-0"],
+        "step_ids": [0],
+        "reset_mask": [True],
+        "seeds": [41],
+    }
+    context[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        types.PolicySessionContext(**context)
 
 
 def test_tensor_data_accepts_natural_rgb_and_mask_numpy_dtypes() -> None:

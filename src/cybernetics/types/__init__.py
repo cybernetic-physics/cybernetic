@@ -74,6 +74,7 @@ from .optim_step_request import AdamParams as AdamParams
 from .optim_step_request import OptimStepRequest as OptimStepRequest
 from .optim_step_response import OptimStepResponse as OptimStepResponse
 from .policy_conditioning import PolicyConditioning as PolicyConditioning
+from .policy_session_context import PolicySessionContext as PolicySessionContext
 from .policy_trajectory_step import PolicyTrajectoryStep as PolicyTrajectoryStep
 from .request_error_category import RequestErrorCategory as RequestErrorCategory
 from .request_failed_response import RequestFailedResponse as RequestFailedResponse
@@ -106,6 +107,7 @@ from .telemetry_response import TelemetryResponse as TelemetryResponse
 from .telemetry_send_request import TelemetrySendRequest as TelemetrySendRequest
 from .tensor_data import TensorData as TensorData
 from .tensor_dtype import TensorDtype as TensorDtype
+from .text_data import TextData as TextData
 from .training_run import TrainingRun as TrainingRun
 from .training_runs_response import TrainingRunsResponse as TrainingRunsResponse
 from .unhandled_exception_event import UnhandledExceptionEvent as UnhandledExceptionEvent

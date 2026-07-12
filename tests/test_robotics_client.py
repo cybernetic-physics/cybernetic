@@ -1,0 +1,335 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from zipfile import ZipFile
+
+import httpx
+import pytest
+import respx
+from test_robotics_runtime_contracts import job_dict
+
+from cybernetics import Client
+from cybernetics.robotics import (
+    AssetBundleRef,
+    RobotEvalsClient,
+    RobotEvalsError,
+    RoboticsJobSpec,
+    RoboticsPreflight,
+)
+from cybernetics.robotics.client import _inspect_zip, _next_shard_job
+
+BASE = "https://api.test"
+
+
+@pytest.fixture(autouse=True)
+def _credentials(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("CYBERNETICS_API_KEY", "cp_live_test")
+    monkeypatch.setenv("CYBERNETICS_BASE_URL", BASE)
+
+
+@respx.mock
+def test_submit_get_and_cancel_robotics_run() -> None:
+    create = respx.post(f"{BASE}/v1/eval/runs").mock(
+        return_value=httpx.Response(200, json={"id": "evrun_1", "status": "queued"})
+    )
+    get = respx.get(f"{BASE}/v1/eval/runs/evrun_1").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "evrun_1",
+                "status": "running",
+                "events": [{"event_type": "runtime_started"}],
+                "artifacts": [{"id": 1, "role": "run_result"}],
+            },
+        )
+    )
+    cancel = respx.post(f"{BASE}/v1/eval/runs/evrun_1/cancel").mock(
+        return_value=httpx.Response(204)
+    )
+    job = RoboticsJobSpec.from_dict(job_dict())
+
+    with RobotEvalsClient() as client:
+        assert client.submit(job, budget_usd_limit=3.5)["id"] == "evrun_1"
+        assert client.get_run("evrun_1")["status"] == "running"
+        assert client.list_events("evrun_1")[0]["event_type"] == "runtime_started"
+        assert client.list_artifacts("evrun_1")[0]["role"] == "run_result"
+        client.cancel("evrun_1")
+
+    payload = json.loads(create.calls[0].request.content)
+    assert payload["job"]["schema_version"] == "robotics-job/v1"
+    assert "gpu_type" not in payload["job"]["placement"]["simulator_resources"]
+    assert payload["budgetUsdLimit"] == 3.5
+    assert get.called and cancel.called
+
+
+@respx.mock
+def test_benchmark_compose_preflight_and_hash_bound_submit() -> None:
+    job = RoboticsJobSpec.from_dict(job_dict())
+    catalog = respx.get(f"{BASE}/v1/eval/robotics/catalog").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "schemaVersion": "robotics-benchmark-catalog/v1",
+                "items": [
+                    {
+                        "id": "internnav-r2r-val-unseen",
+                        "version": "r2r-val-unseen-v1",
+                        "name": "R2R validation-unseen",
+                        "description": "Navigation benchmark",
+                        "family": "vision-language-navigation",
+                        "benchmark": "R2R",
+                        "split": "val_unseen",
+                        "status": "available",
+                        "tags": ["Habitat"],
+                        "simulator": {
+                            "packageId": "sim-habitat",
+                            "name": "Habitat Lab",
+                            "runtime": "GPU simulator",
+                            "gpuRequired": True,
+                        },
+                        "primaryMetric": "success",
+                        "nativeMetrics": ["success", "spl"],
+                        "defaults": {
+                            "episodes": 100,
+                            "vectorWidth": 2,
+                            "maxSteps": 500,
+                            "rootSeed": 0,
+                            "video": True,
+                            "datasetExport": "jsonl",
+                        },
+                        "defaultPolicyId": "cma",
+                        "policies": [
+                            {
+                                "id": "cma",
+                                "name": "CMA",
+                                "modelId": "internnav-cma-r2r",
+                                "runtimeFamily": "internnav_cma",
+                                "source": "worldlines",
+                                "status": "available",
+                                "description": "Hosted recurrent policy",
+                                "requirements": [],
+                            }
+                        ],
+                        "requirements": [],
+                    }
+                ],
+            },
+        )
+    )
+    preflight = respx.post(f"{BASE}/v1/eval/robotics/preflight").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "schemaVersion": "robotics-preflight/v1",
+                "valid": True,
+                "launchable": True,
+                "source": {
+                    "mode": "catalog",
+                    "benchmarkId": "internnav-r2r-val-unseen",
+                    "benchmarkVersion": "r2r-val-unseen-v1",
+                    "policyId": "cma",
+                },
+                "job": job.to_dict(),
+                "jobHash": job.job_hash(),
+                "worldlinesBilling": "separate_hosted_service",
+                "checks": [
+                    {
+                        "id": "contract",
+                        "status": "pass",
+                        "title": "Contract",
+                        "message": "Valid",
+                    }
+                ],
+            },
+        )
+    )
+    submit = respx.post(f"{BASE}/v1/eval/runs").mock(
+        return_value=httpx.Response(200, json={"id": "evrun_2", "status": "queued"})
+    )
+
+    with RobotEvalsClient() as client:
+        prepared = client.compose(
+            "internnav-r2r-val-unseen",
+            deployment_id="wlp-cma-ready",
+            episode_start=40,
+            episodes=8,
+            vector_width=2,
+            predictions=True,
+            budget_usd_limit=5,
+        )
+        assert isinstance(prepared, RoboticsPreflight)
+        assert prepared.require_launchable_job() == job
+        assert client.submit_preflight(prepared, budget_usd_limit=5)["id"] == "evrun_2"
+
+    compose_payload = json.loads(preflight.calls[0].request.content)
+    assert compose_payload["experiment"]["benchmarkId"] == "internnav-r2r-val-unseen"
+    assert compose_payload["experiment"]["policyId"] == "cma"
+    assert compose_payload["experiment"]["deploymentId"] == "wlp-cma-ready"
+    assert compose_payload["experiment"]["episodeShard"] == {"start": 40, "count": 8}
+    assert compose_payload["experiment"]["evidence"]["predictions"] is True
+    submit_payload = json.loads(submit.calls[0].request.content)
+    assert submit_payload["expectedJobHash"] == job.job_hash()
+    assert catalog.called and preflight.called and submit.called
+
+
+@respx.mock
+def test_register_and_list_hosted_policy_deployments() -> None:
+    payload = job_dict()["policy"]
+    payload["source"] = "worldlines"
+    payload["checkpoint_ref"] = "worldlines://run/sampler_weights/checkpoint"
+    policy = RoboticsJobSpec.from_dict({**job_dict(), "policy": payload}).policy
+    create = respx.post(f"{BASE}/v1/eval/robotics/policy-deployments").mock(
+        return_value=httpx.Response(
+            201,
+            json={"id": policy.deployment_id, "status": "ready", "snapshot": policy.to_dict()},
+        )
+    )
+    listing = respx.get(f"{BASE}/v1/eval/robotics/policy-deployments").mock(
+        return_value=httpx.Response(
+            200,
+            json={"items": [{"id": policy.deployment_id, "status": "ready"}]},
+        )
+    )
+
+    with RobotEvalsClient() as client:
+        assert client.register_policy_deployment(policy, status="ready")["status"] == "ready"
+        assert client.list_policy_deployments()[0]["id"] == policy.deployment_id
+
+    assert json.loads(create.calls[0].request.content)["policy"] == policy.to_dict()
+    assert listing.called
+
+
+@respx.mock
+def test_upload_asset_bundle_returns_immutable_ref(tmp_path) -> None:
+    bundle = tmp_path / "r2r.zip"
+    bundle.write_bytes(b"fixture-dataset-bundle")
+    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    create = respx.post(f"{BASE}/v1/eval/asset-bundles").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "id": "raset_1",
+                "uri": "cybernetics://artifacts/raset_1",
+                "status": "uploading",
+                "upload": {
+                    "url": "https://s3.test/upload",
+                    "fields": {"key": "robot-assets/raset_1/bundle"},
+                },
+            },
+        )
+    )
+    upload = respx.post("https://s3.test/upload").mock(return_value=httpx.Response(204))
+    finalize = respx.post(f"{BASE}/v1/eval/asset-bundles/raset_1/finalize").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "raset_1",
+                "status": "ready",
+                "contentSha256": digest,
+            },
+        )
+    )
+
+    with RobotEvalsClient() as client:
+        ref = client.upload_asset_bundle(bundle, name="R2R validation")
+
+    assert isinstance(ref, AssetBundleRef)
+    assert ref.content_sha256 == digest
+    assert ref.uri == "cybernetics://artifacts/raset_1"
+    request = json.loads(create.calls[0].request.content)
+    assert request["contentSha256"] == digest
+    assert upload.called and finalize.called
+
+
+@pytest.mark.parametrize("member", ["data\\scene.usd", "data//scene.usd", "data/./scene.usd"])
+def test_asset_zip_inspection_rejects_nonportable_paths(tmp_path, member: str) -> None:
+    bundle = tmp_path / "unsafe.zip"
+    with ZipFile(bundle, "w") as archive:
+        archive.writestr(member, "usd")
+
+    with pytest.raises(RobotEvalsError, match="unsafe path"):
+        _inspect_zip(bundle)
+
+
+def test_asset_zip_inspection_rejects_empty_and_duplicate_archives(tmp_path) -> None:
+    empty = tmp_path / "empty.zip"
+    with ZipFile(empty, "w"):
+        pass
+    with pytest.raises(RobotEvalsError, match="no files"):
+        _inspect_zip(empty)
+
+    duplicate = tmp_path / "duplicate.zip"
+    with ZipFile(duplicate, "w") as archive:
+        archive.writestr("data/scene.usd", "first")
+        archive.writestr("data/scene.usd", "second")
+    with pytest.raises(RobotEvalsError, match="duplicate path"):
+        _inspect_zip(duplicate)
+
+
+def test_composition_client_exposes_robotics_namespace() -> None:
+    with Client() as client:
+        assert isinstance(client.robotics, RobotEvalsClient)
+
+
+def test_next_shard_preserves_benchmark_lineage_and_resolves_absolute_seeds() -> None:
+    payload = job_dict()
+    payload["rollout"]["seeds"] = [45, 46]
+    payload["metadata"]["experiment"] = {
+        "schema_version": "robotics-experiment/v1",
+        "benchmark_id": "internnav-r2r-val-unseen",
+        "benchmark_version": "r2r-val-unseen-v1",
+        "policy_id": "cma",
+        "episode_shard": {"start": 4, "count": 2},
+    }
+
+    next_job = _next_shard_job(RoboticsJobSpec.from_dict(payload), episodes=3)
+
+    assert next_job.rollout.seeds == [47, 48, 49]
+    assert next_job.metadata["experiment"]["episode_shard"] == {"start": 6, "count": 3}
+    assert next_job.metadata["experiment"]["benchmark_version"] == "r2r-val-unseen-v1"
+
+
+@respx.mock
+def test_compare_uses_server_compatibility_validation() -> None:
+    route = respx.post(f"{BASE}/v1/eval/compares").mock(
+        return_value=httpx.Response(200, json={"id": "evcmp_1"})
+    )
+
+    with RobotEvalsClient() as client:
+        result = client.compare("evrun_base", "evrun_candidate")
+
+    assert result["id"] == "evcmp_1"
+    assert json.loads(route.calls[0].request.content) == {
+        "name": "evrun_base vs evrun_candidate",
+        "baseRunId": "evrun_base",
+        "candidateRunId": "evrun_candidate",
+        "visibility": "private",
+    }
+
+
+@respx.mock
+def test_promote_to_behavior_ci_requires_and_submits_passing_immutable_job() -> None:
+    job = RoboticsJobSpec.from_dict(job_dict())
+    respx.get(f"{BASE}/v1/eval/runs/evrun_pass").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "evrun_pass",
+                "status": "completed",
+                "manifest": job.to_dict(),
+                "episodes": [{"status": "succeeded"}, {"status": "succeeded"}],
+            },
+        )
+    )
+    promoted = respx.post(f"{BASE}/v1/eval/runs/ci").mock(
+        return_value=httpx.Response(200, json={"id": "evrun_ci"})
+    )
+
+    with RobotEvalsClient() as client:
+        assert client.promote_to_behavior_ci("evrun_pass")["id"] == "evrun_ci"
+
+    payload = json.loads(promoted.calls[0].request.content)
+    assert payload["expectedJobHash"] == job.job_hash()
+    assert payload["ciContext"] == {"promotedFromRunId": "evrun_pass"}

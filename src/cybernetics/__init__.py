@@ -58,6 +58,7 @@ from .types import (
     StopReason,
     TensorData,
     TensorDtype,
+    TextData,
     TrainingRun,
 )
 
@@ -92,6 +93,7 @@ __all__ = [
     "StopReason",
     "TensorData",
     "TensorDtype",
+    "TextData",
     "TrainingRun",
     # Client configuration
     "Timeout",

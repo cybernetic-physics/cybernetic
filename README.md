@@ -197,6 +197,44 @@ The base robotics package is designed to import without sim, Isaac, ROS2,
 MuJoCo, Worldlines, or Cosmos runtime packages installed. Heavy backend
 execution belongs behind backend adapters, not in the package import path.
 
+### Benchmark-first managed evaluations
+
+The `Client().robotics` namespace uses the same benchmark catalog and immutable
+preflight as the web product:
+
+```python
+from cybernetics import Client
+
+with Client() as client:
+    benchmarks = client.robotics.list_benchmarks()
+    prepared = client.robotics.compose(
+        "internnav-r2r-val-unseen",
+        policy_id="internnav-cma-r2r",
+        episode_start=200,
+        episodes=32,
+        vector_width=8,
+        video=True,
+        dataset_export="jsonl",
+        budget_usd_limit=20,
+    )
+    for check in prepared.checks:
+        print(check.status, check.title, check.message)
+    run = client.robotics.submit_preflight(prepared, budget_usd_limit=20)
+```
+
+`compose()` returns the server-normalized `RoboticsJobSpec` and canonical hash
+even when setup blockers prevent launch. `submit_preflight()` accepts only a
+launchable report, checks that the hash still matches the job, and binds that
+hash at queue admission. Advanced callers can construct a `RoboticsJobSpec`
+directly and call `client.robotics.preflight(job)`.
+
+Simulator and policy development remain separable. Implement the public
+`SimulatorServiceClient` or `PolicyServiceClient` protocol, then use
+`validate_simulator_descriptor()` or `validate_policy_descriptor()` against the
+preflighted job before composing them in a rollout coordinator. The SDK owns
+contracts and validation only; concrete simulator transports and hosted
+Worldlines scheduling remain in their respective runtimes.
+
 ## DreamZero examples
 
 The repository ships an SDK-native DreamZero SFT smoke at

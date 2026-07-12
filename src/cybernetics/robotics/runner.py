@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -10,6 +11,15 @@ from .contracts import ROBOT_RUN_SCHEMA_VERSION, RobotRunRecord, RobotTaskSpec, 
 from .env import RobotEnv, StepResult
 
 ActionFn = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+_SUCCESS_OPERATORS = {
+    "==": operator.eq,
+    "!=": operator.ne,
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+}
 
 
 def default_action(observation: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -55,8 +65,12 @@ def run_robot_episode(
             total_reward += float(result.reward)
             rollout.append({"step": step_index, "action": action_payload, **result.to_dict()})
             observation = result.observation
-            if result.terminated:
+            succeeded = _success_metric_satisfied(task_spec, result)
+            if succeeded:
                 status = "succeeded"
+                break
+            if result.terminated:
+                status = "failed"
                 break
             if result.truncated:
                 status = "truncated"
@@ -75,6 +89,7 @@ def run_robot_episode(
         "status": status,
         "steps": len(rollout),
         "total_reward": total_reward,
+        "success": status == "succeeded",
     }
     write_json_artifact(output / "rollout.json", {"run_id": run_id, "steps": rollout})
     write_json_artifact(output / "metrics.json", metrics)
@@ -94,3 +109,18 @@ def run_robot_episode(
     )
     write_robot_run_record(output / "run_record.json", record)
     return record
+
+
+def _success_metric_satisfied(task_spec: RobotTaskSpec, result: StepResult) -> bool:
+    spec = task_spec.success_metric
+    metric = str(spec.get("metric", ""))
+    op = str(spec.get("operator", ""))
+    if not metric or op not in _SUCCESS_OPERATORS or "value" not in spec:
+        raise ValueError("task success_metric must contain metric, operator, and value")
+    if metric in result.info:
+        actual = result.info[metric]
+    elif metric in result.observation:
+        actual = result.observation[metric]
+    else:
+        return False
+    return bool(_SUCCESS_OPERATORS[op](actual, spec["value"]))
