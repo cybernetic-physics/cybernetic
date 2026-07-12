@@ -10,6 +10,8 @@ from urllib.parse import urlencode, urlparse
 
 from cybernetics.lib.credentials import resolve_api_key, resolve_base_url
 
+from .errors import SimulationError
+from .mcp import SessionMCPClient
 from .packaging import AssetPackage, package_local_asset
 
 DEFAULT_BASE_URL = "https://api.cyberneticphysics.com"
@@ -17,10 +19,6 @@ SIMULATION_ASSET_REF_SCHEMA_VERSION = "simulation-asset-ref/v1"
 _READY_STATUSES = {"running", "idle"}
 _TERMINAL_STATUSES = {"failed", "terminated", "stopped", "error", "snapshot_failed"}
 AssetRefKind = Literal["environment_version", "local_bundle", "catalog_asset"]
-
-
-class SimulationError(RuntimeError):
-    """A simulation asset operation failed."""
 
 
 @dataclass(frozen=True)
@@ -241,12 +239,22 @@ class SimulationClient:
 
             http_client = httpx.Client(base_url=self.base_url, timeout=180.0)
         self._client = http_client
+        self._mcp_clients: set[SessionMCPClient] = set()
 
     def close(self) -> None:
+        cleanup_error: Exception | None = None
+        for mcp_client in tuple(self._mcp_clients):
+            try:
+                mcp_client.close()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+        self._mcp_clients.clear()
         if self._owns_client:
             close = getattr(self._client, "close", None)
             if callable(close):
                 close()
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def __enter__(self) -> "SimulationClient":
         return self
@@ -313,8 +321,7 @@ class SimulationClient:
             "/v1/envs",
             json_body={
                 "name": env_name,
-                "description": description
-                or f"Imported by cybernetics sim from {Path(ref).name}",
+                "description": description or f"Imported by cybernetics sim from {Path(ref).name}",
             },
         )
         env_id = _require_str(environment, "id")
@@ -424,9 +431,7 @@ class SimulationClient:
         poll_interval_seconds: float = 5.0,
     ) -> SimRenderResult:
         if public:
-            raise SimulationError(
-                "Public /sim artifact pages are not implemented in the MVP."
-            )
+            raise SimulationError("Public /sim artifact pages are not implemented in the MVP.")
 
         imported = self._coerce_import_result(
             asset_ref,
@@ -491,7 +496,9 @@ class SimulationClient:
                 return session
             last = f"status={status or 'unknown'}"
             if time.monotonic() >= deadline:
-                raise SimulationError(f"session {session_id} was not ready after {timeout_seconds}s ({last})")
+                raise SimulationError(
+                    f"session {session_id} was not ready after {timeout_seconds}s ({last})"
+                )
             time.sleep(poll_interval_seconds)
 
     def preview_url(self, session_id: str, *, ttl_seconds: int = 3600, quality: int = 90) -> str:
@@ -525,6 +532,64 @@ class SimulationClient:
     def stop_session(self, session_id: str) -> None:
         self._request("POST", f"/v1/sessions/{session_id}/stop", json_body={})
 
+    def mcp_session(
+        self,
+        session_id: str,
+        *,
+        ttl_seconds: int = 3600,
+        name: str | None = None,
+    ) -> SessionMCPClient:
+        """Mint private, session-scoped credentials for ``isaac.*`` MCP calls."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise SimulationError("MCP session_id must be a non-empty string")
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise SimulationError("MCP ttl_seconds must be an integer")
+        if ttl_seconds < 1 or ttl_seconds > 24 * 3600:
+            raise SimulationError("MCP ttl_seconds must be between 1 and 86400")
+        if name is not None and (not isinstance(name, str) or not name.strip() or len(name) > 100):
+            raise SimulationError(
+                "MCP key name must be a non-empty string of at most 100 characters"
+            )
+
+        request_body: dict[str, Any] = {
+            "sessionId": session_id,
+            "ttlSeconds": ttl_seconds,
+        }
+        if name is not None:
+            request_body["name"] = name
+        grant = self._request(
+            "POST",
+            "/v1/api-keys/session-scoped",
+            json_body=request_body,
+        )
+        key_id = _require_str(grant, "id")
+        try:
+            if _require_str(grant, "sessionId") != session_id:
+                raise SimulationError("session-scoped key response targeted a different session")
+            if _require_str(grant, "keyKind") != "session":
+                raise SimulationError("session-scoped key response has an invalid key kind")
+            scoped_key = _require_str(grant, "key")
+        except SimulationError:
+            try:
+                self._revoke_mcp_key(key_id)
+            except SimulationError:
+                pass
+            raise
+
+        mcp_client = SessionMCPClient(
+            base_url=self.base_url,
+            http_client=self._client,
+            session_id=session_id,
+            key_id=key_id,
+            scoped_key=scoped_key,
+            revoke_key=self._revoke_mcp_key,
+        )
+        self._mcp_clients.add(mcp_client)
+        return mcp_client
+
+    def _revoke_mcp_key(self, key_id: str) -> None:
+        self._request("DELETE", f"/v1/api-keys/{key_id}")
+
     def _neko_login_token(self, http_base: str, grant: dict[str, Any]) -> str:
         response = self._client.post(
             f"{http_base}/api/login",
@@ -553,7 +618,9 @@ class SimulationClient:
             return SimImportResult(
                 asset_ref=value.uri,
                 environment=None,
-                version={"id": value.version_id, "envId": value.env_id} if value.version_id else None,
+                version={"id": value.version_id, "envId": value.env_id}
+                if value.version_id
+                else None,
                 environment_ref=value,
                 package=None,
             )

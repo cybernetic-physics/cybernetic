@@ -8,9 +8,10 @@ from .client import (
     SimRenderResult,
     SimulationAssetRef,
     SimulationClient,
-    SimulationError,
     parse_environment_ref,
 )
+from .errors import SimulationError, SimulationMCPError
+from .mcp import SessionMCPClient
 from .packaging import (
     AssetPackage,
     AssetPackageError,
@@ -28,6 +29,8 @@ __all__ = [
     "SimulationAssetRef",
     "SimulationClient",
     "SimulationError",
+    "SimulationMCPError",
+    "SessionMCPClient",
     "SIMULATION_ASSET_REF_SCHEMA_VERSION",
     "inspect_local_asset",
     "package_local_asset",
