@@ -103,6 +103,33 @@ with cybernetics.Client() as client:
     print(preview.launch_url)
 ```
 
+An authenticated SDK client can also control the hosted Isaac session through a
+private, session-scoped MCP grant. The grant is pinned to one session, permits
+only `isaac.*` tools, and is revoked when the MCP context closes. Closing the MCP
+context does not stop the Isaac session.
+
+```python
+import cybernetics
+
+environment = "cybernetics://envs/env_.../versions/ver_..."
+
+with cybernetics.Client() as client:
+    launched = client.sim.launch(environment, wait=True)
+    try:
+        with client.sim.mcp_session(launched.session_id) as isaac:
+            scene = isaac.call_tool("isaac.get_scene_info")
+            isaac.call_tool("isaac.step_simulation", {"steps": 1})
+            print(scene)
+    finally:
+        client.sim.stop_session(launched.session_id)
+```
+
+This MCP boundary controls simulation only. DreamZero sampling and LoRA training
+continue through the Worldlines clients. A robotics loop captures RGB and
+proprioception from hosted Isaac, calls `sample_droid()` (or the lower-level
+continuous-policy sampling contract), and applies the returned action chunk to
+the same hosted session.
+
 `cybernetics.sim` owns asset packaging, import, preview, render, catalog, and
 launch helpers. `cybernetics.robotics` owns `RobotTaskSpec`, backend adapters,
 run records, policy artifacts, replay artifacts, datasets, and evaluation
