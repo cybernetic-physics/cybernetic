@@ -74,6 +74,7 @@ from .optim_step_request import AdamParams as AdamParams
 from .optim_step_request import OptimStepRequest as OptimStepRequest
 from .optim_step_response import OptimStepResponse as OptimStepResponse
 from .policy_conditioning import PolicyConditioning as PolicyConditioning
+from .policy_session_context import PolicySessionContext as PolicySessionContext
 from .policy_trajectory_step import PolicyTrajectoryStep as PolicyTrajectoryStep
 from .request_error_category import RequestErrorCategory as RequestErrorCategory
 from .request_failed_response import RequestFailedResponse as RequestFailedResponse

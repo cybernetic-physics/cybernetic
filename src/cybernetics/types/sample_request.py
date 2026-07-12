@@ -8,6 +8,7 @@ from .._models import StrictBase
 from .droid_observation import DroidObservation
 from .model_input import ModelInput
 from .policy_conditioning import PolicyConditioning
+from .policy_session_context import PolicySessionContext
 from .sampling_params import SamplingParams
 
 __all__ = ["SampleRequest"]
@@ -40,6 +41,13 @@ class SampleRequest(StrictBase):
 
     include_predicted_video: bool = False
     """Return one bounded predicted-video latent from the native joint pass."""
+
+    policy_context: Optional[PolicySessionContext] = None
+    """Recurrent lane identity, step, reset, and seed metadata.
+
+    The hosted runtime scopes these lanes to ``sampling_session_id``. Token-only
+    samplers ignore this field.
+    """
 
     sampling_params: SamplingParams
 

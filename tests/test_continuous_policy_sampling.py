@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+from pydantic import ValidationError
 
 from cybernetics import types
 from cybernetics._compat import model_dump
@@ -47,6 +49,12 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
             "state_mask": _tensor([1], "int64", [1]),
             "embodiment_id": _tensor([0], "int64", [1]),
         },
+        policy_context=types.PolicySessionContext(
+            sequence_ids=["episode-000001"],
+            step_ids=[7],
+            reset_mask=[True],
+            seeds=[41],
+        ),
     )
 
     body = model_dump(request, exclude_unset=True, mode="json")
@@ -56,6 +64,12 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
     assert body["conditioning"]["state"]["data"] == [0.5, -0.5]
     assert body["policy_mode"] == "native"
     assert body["include_predicted_video"] is True
+    assert body["policy_context"] == {
+        "sequence_ids": ["episode-000001"],
+        "step_ids": [7],
+        "reset_mask": [True],
+        "seeds": [41],
+    }
 
 
 def test_raw_droid_observation_is_typed_and_sample_droid_is_ergonomic() -> None:
@@ -140,6 +154,40 @@ def test_sampling_client_carries_policy_mode_and_video_request() -> None:
     assert observed_requests[0].seq_id == 17
     assert observed_requests[0].policy_mode == "native"
     assert observed_requests[0].include_predicted_video is True
+
+
+def test_policy_session_context_rejects_mismatched_lanes() -> None:
+    with pytest.raises(ValidationError, match="must match sequence_ids length"):
+        types.PolicySessionContext(
+            sequence_ids=["lane-0", "lane-1"],
+            step_ids=[0],
+            reset_mask=[True, True],
+            seeds=[10, 11],
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sequence_ids", [], "1..4096 lanes"),
+        ("sequence_ids", ["x" * 257], "at most 256 characters"),
+        ("step_ids", [-1], "JSON-safe integers"),
+        ("seeds", [2**53], "JSON-safe integers"),
+    ],
+)
+def test_policy_session_context_bounds_hosted_state_keys(
+    field: str, value: list[object], message: str
+) -> None:
+    context = {
+        "sequence_ids": ["lane-0"],
+        "step_ids": [0],
+        "reset_mask": [True],
+        "seeds": [41],
+    }
+    context[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        types.PolicySessionContext(**context)
 
 
 def test_tensor_data_accepts_natural_rgb_and_mask_numpy_dtypes() -> None:

@@ -8,7 +8,7 @@ from typing import Any, Dict, Mapping, Protocol, Sequence, runtime_checkable
 
 from .contracts import RobotContractError
 from .env import StepResult, VectorStepResult
-from .runtime_contracts import ActionChunk
+from .runtime_contracts import ActionChunk, RoboticsJobSpec, canonical_runtime_json
 
 SIM_SERVICE_PROTOCOL_VERSION = "sim-service/v1"
 POLICY_SERVICE_PROTOCOL_VERSION = "policy-service/v1"
@@ -272,6 +272,71 @@ class PolicyServiceClient(Protocol):
     def close(self) -> None: ...
 
 
+def validate_simulator_descriptor(
+    job: RoboticsJobSpec,
+    simulator: SimulatorServiceDescriptor,
+) -> None:
+    """Validate one simulator service independently from policy deployment."""
+
+    expected_observation = {
+        name: spec.to_dict() for name, spec in job.task.observation_schema.items()
+    }
+    checks = {
+        "simulator package hash": simulator.simulator_package_hash == job.simulator.package_hash(),
+        "task package hash": simulator.task_package_hash == job.task.package_hash(),
+        "simulator vector width": simulator.vector_width == job.rollout.vector_width,
+        "simulator capabilities": set(simulator.capabilities) == set(job.simulator.capabilities),
+        "simulator observation schema": canonical_runtime_json(simulator.observation_schema)
+        == canonical_runtime_json(expected_observation),
+        "simulator action spec": canonical_runtime_json(simulator.action_spec)
+        == canonical_runtime_json(job.task.action_spec.to_dict()),
+    }
+    _raise_descriptor_failures(checks)
+
+
+def validate_policy_descriptor(
+    job: RoboticsJobSpec,
+    policy: PolicyServiceDescriptor,
+) -> None:
+    """Validate one local or hosted policy service independently from a simulator."""
+
+    expected_observation = {
+        name: spec.to_dict() for name, spec in job.policy.observation_schema.items()
+    }
+    checks = {
+        "policy deployment hash": policy.policy_deployment_hash == job.policy.deployment_hash(),
+        "policy deployment id": policy.policy_deployment_id == job.policy.deployment_id,
+        "policy revision": policy.policy_revision == job.policy.revision,
+        "policy batch size": policy.batch_size == job.rollout.vector_width,
+        "policy max horizon": policy.max_horizon == job.policy.max_horizon,
+        "policy state model": policy.state_model == job.policy.state_model,
+        "policy reset granularity": policy.reset_granularity == job.policy.reset_granularity,
+        "policy deterministic": policy.deterministic == job.policy.deterministic,
+        "policy observation schema": canonical_runtime_json(policy.observation_schema)
+        == canonical_runtime_json(expected_observation),
+        "policy action spec": canonical_runtime_json(policy.action_spec)
+        == canonical_runtime_json(job.policy.action_spec.to_dict()),
+    }
+    _raise_descriptor_failures(checks)
+
+
+def validate_component_descriptors(
+    job: RoboticsJobSpec,
+    simulator: SimulatorServiceDescriptor,
+    policy: PolicyServiceDescriptor,
+) -> None:
+    """Validate separately owned simulator and policy services against one job."""
+
+    validate_simulator_descriptor(job, simulator)
+    validate_policy_descriptor(job, policy)
+
+
+def _raise_descriptor_failures(checks: Mapping[str, bool]) -> None:
+    failures = [name for name, valid in checks.items() if not valid]
+    if failures:
+        raise RobotServiceContractError(f"service descriptor mismatch: {', '.join(failures)}")
+
+
 __all__ = [
     "POLICY_SERVICE_PROTOCOL_VERSION",
     "SIM_SERVICE_PROTOCOL_VERSION",
@@ -280,4 +345,7 @@ __all__ = [
     "RobotServiceContractError",
     "SimulatorServiceClient",
     "SimulatorServiceDescriptor",
+    "validate_component_descriptors",
+    "validate_policy_descriptor",
+    "validate_simulator_descriptor",
 ]

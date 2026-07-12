@@ -15,6 +15,7 @@ from cybernetics.robotics import (
     RobotEvalsClient,
     RobotEvalsError,
     RoboticsJobSpec,
+    RoboticsPreflight,
 )
 from cybernetics.robotics.client import _inspect_zip
 
@@ -61,6 +62,114 @@ def test_submit_get_and_cancel_robotics_run() -> None:
     assert "gpu_type" not in payload["job"]["placement"]["simulator_resources"]
     assert payload["budgetUsdLimit"] == 3.5
     assert get.called and cancel.called
+
+
+@respx.mock
+def test_benchmark_compose_preflight_and_hash_bound_submit() -> None:
+    job = RoboticsJobSpec.from_dict(job_dict())
+    catalog = respx.get(f"{BASE}/v1/eval/robotics/catalog").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "schemaVersion": "robotics-benchmark-catalog/v1",
+                "items": [
+                    {
+                        "id": "internnav-r2r-val-unseen",
+                        "version": "r2r-val-unseen-v1",
+                        "name": "R2R validation-unseen",
+                        "description": "Navigation benchmark",
+                        "family": "vision-language-navigation",
+                        "benchmark": "R2R",
+                        "split": "val_unseen",
+                        "status": "available",
+                        "tags": ["Habitat"],
+                        "simulator": {
+                            "packageId": "sim-habitat",
+                            "name": "Habitat Lab",
+                            "runtime": "GPU simulator",
+                            "gpuRequired": True,
+                        },
+                        "primaryMetric": "success",
+                        "nativeMetrics": ["success", "spl"],
+                        "defaults": {
+                            "episodes": 100,
+                            "vectorWidth": 2,
+                            "maxSteps": 500,
+                            "rootSeed": 0,
+                            "video": True,
+                            "datasetExport": "jsonl",
+                        },
+                        "defaultPolicyId": "cma",
+                        "policies": [
+                            {
+                                "id": "cma",
+                                "name": "CMA",
+                                "modelId": "internnav-cma-r2r",
+                                "runtimeFamily": "internnav_cma",
+                                "source": "worldlines",
+                                "status": "available",
+                                "description": "Hosted recurrent policy",
+                                "requirements": [],
+                            }
+                        ],
+                        "requirements": [],
+                    }
+                ],
+            },
+        )
+    )
+    preflight = respx.post(f"{BASE}/v1/eval/robotics/preflight").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "schemaVersion": "robotics-preflight/v1",
+                "valid": True,
+                "launchable": True,
+                "source": {
+                    "mode": "catalog",
+                    "benchmarkId": "internnav-r2r-val-unseen",
+                    "benchmarkVersion": "r2r-val-unseen-v1",
+                    "policyId": "cma",
+                },
+                "job": job.to_dict(),
+                "jobHash": job.job_hash(),
+                "worldlinesBilling": "separate_hosted_service",
+                "checks": [
+                    {
+                        "id": "contract",
+                        "status": "pass",
+                        "title": "Contract",
+                        "message": "Valid",
+                    }
+                ],
+            },
+        )
+    )
+    submit = respx.post(f"{BASE}/v1/eval/runs").mock(
+        return_value=httpx.Response(200, json={"id": "evrun_2", "status": "queued"})
+    )
+
+    with RobotEvalsClient() as client:
+        prepared = client.compose(
+            "internnav-r2r-val-unseen",
+            episode_start=40,
+            episodes=8,
+            vector_width=2,
+            predictions=True,
+            budget_usd_limit=5,
+        )
+        assert isinstance(prepared, RoboticsPreflight)
+        assert prepared.require_launchable_job() == job
+        assert client.submit_preflight(prepared, budget_usd_limit=5)["id"] == "evrun_2"
+
+    compose_payload = json.loads(preflight.calls[0].request.content)
+    assert compose_payload["experiment"]["benchmarkId"] == "internnav-r2r-val-unseen"
+    assert compose_payload["experiment"]["policyId"] == "cma"
+    assert compose_payload["experiment"]["episodeShard"] == {"start": 40, "count": 8}
+    assert compose_payload["experiment"]["evidence"]["predictions"] is True
+    submit_payload = json.loads(submit.calls[0].request.content)
+    assert submit_payload["expectedJobHash"] == job.job_hash()
+    assert catalog.called and preflight.called and submit.called
 
 
 @respx.mock

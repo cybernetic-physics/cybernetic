@@ -30,6 +30,16 @@ from .contracts import (
 from .datasets import create_trajectory_dataset_from_runs
 from .env import ObservationBundle, RobotEnv, StepResult, VectorRobotEnv, VectorStepResult
 from .evidence import RoboticsEvidenceError, write_robotics_behavior_bundle
+from .experiments import (
+    ROBOTICS_CATALOG_SCHEMA_VERSION,
+    ROBOTICS_EXPERIMENT_SCHEMA_VERSION,
+    ROBOTICS_PREFLIGHT_SCHEMA_VERSION,
+    RoboticsBenchmarkTemplate,
+    RoboticsPolicyTemplate,
+    RoboticsPreflight,
+    RoboticsPreflightCheck,
+    experiment_request,
+)
 from .fixture import FixtureRobotEnv
 from .gymnasium import GymnasiumRobotEnvAdapter, GymnasiumVectorEnvAdapter, RobotBackendError
 from .locomujoco import LocoMuJoCoRobotEnv
@@ -78,6 +88,9 @@ from .runtime_services import (
     RobotServiceContractError,
     SimulatorServiceClient,
     SimulatorServiceDescriptor,
+    validate_component_descriptors,
+    validate_policy_descriptor,
+    validate_simulator_descriptor,
 )
 from .vla_eval import (
     VLA_EVAL_RECORD_SCHEMA_VERSION,
@@ -106,6 +119,9 @@ __all__ = [
     "POLICY_SERVICE_PROTOCOL_VERSION",
     "ROBOT_POLICY_SCHEMA_VERSION",
     "ROBOTICS_JOB_SCHEMA_VERSION",
+    "ROBOTICS_CATALOG_SCHEMA_VERSION",
+    "ROBOTICS_EXPERIMENT_SCHEMA_VERSION",
+    "ROBOTICS_PREFLIGHT_SCHEMA_VERSION",
     "ROBOT_RUN_SCHEMA_VERSION",
     "ROBOT_TASK_SCHEMA_VERSION",
     "SIMULATOR_PACKAGE_SCHEMA_VERSION",
@@ -131,7 +147,11 @@ __all__ = [
     "RobotRunRecord",
     "RobotTaskSpec",
     "RoboticsEvidenceError",
+    "RoboticsBenchmarkTemplate",
     "RoboticsJobSpec",
+    "RoboticsPolicyTemplate",
+    "RoboticsPreflight",
+    "RoboticsPreflightCheck",
     "RolloutSpec",
     "RuntimeResources",
     "SimulatorPackageSpec",
@@ -172,11 +192,15 @@ __all__ = [
     "default_action",
     "create_trajectory_dataset_from_runs",
     "deterministic_run_id",
+    "experiment_request",
     "run_robot_episode",
     "runtime_contract_hash",
     "stable_hash",
     "train_worldlines_policy",
     "validate_policy_for_replay",
+    "validate_component_descriptors",
+    "validate_policy_descriptor",
+    "validate_simulator_descriptor",
     "write_json_artifact",
     "write_policy_artifact",
     "write_robot_run_record",

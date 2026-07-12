@@ -30,7 +30,6 @@ READINESS_KINDS = ("factory", "method")
 POLICY_DEPLOYMENT_SOURCES = ("fixture", "worldlines", "local")
 POLICY_STATE_MODELS = ("stateless", "recurrent", "history", "dual_system")
 POLICY_RESET_GRANULARITIES = ("session", "batch", "environment")
-PLACEMENT_TOPOLOGIES = ("colocated_required", "colocated_preferred", "separate")
 ACTION_OVERLAP_MODES = ("latest", "fifo", "temporal_ensemble")
 ACTION_REPRESENTATIONS = (
     "discrete",
@@ -51,6 +50,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_DIGEST_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _ASSET_MOUNT_PATH_RE = re.compile(r"^/runtime/assets/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 _ASSET_MOUNT_ROOT_RE = re.compile(r"^/runtime/assets(?:/[A-Za-z0-9._-]+)*$")
+_MAX_JSON_SAFE_INTEGER = (1 << 53) - 1
 
 
 def canonical_runtime_json(value: Mapping[str, Any]) -> str:
@@ -154,6 +154,13 @@ def _nonnegative_int(value: Any, where: str) -> int:
     result = _integer(value, where)
     if result < 0:
         raise RobotContractError(f"{where}: must be a non-negative integer")
+    return result
+
+
+def _json_safe_integer(value: Any, where: str) -> int:
+    result = _integer(value, where)
+    if abs(result) > _MAX_JSON_SAFE_INTEGER:
+        raise RobotContractError(f"{where}: must be a JSON-safe integer")
     return result
 
 
@@ -1110,6 +1117,17 @@ class PolicyDeploymentSpec:
             raise RobotContractError(
                 "worldlines policy deployment endpoints and credentials are control-plane resolved"
             )
+        checkpoint_ref = _optional_string(
+            data.get("checkpoint_ref"), "policy deployment.checkpoint_ref"
+        )
+        if (
+            source == "worldlines"
+            and checkpoint_ref is not None
+            and not checkpoint_ref.startswith("worldlines://")
+        ):
+            raise RobotContractError(
+                "worldlines policy deployment checkpoint_ref must use worldlines://"
+            )
         observation_raw = _mapping(
             _require(data, "observation_schema", "policy deployment"),
             "policy deployment.observation_schema",
@@ -1197,9 +1215,7 @@ class PolicyDeploymentSpec:
                 "policy deployment.deterministic",
             ),
             default_action_selection=default_action_selection,
-            checkpoint_ref=_optional_string(
-                data.get("checkpoint_ref"), "policy deployment.checkpoint_ref"
-            ),
+            checkpoint_ref=checkpoint_ref,
             processor_revision=_optional_string(
                 data.get("processor_revision"), "policy deployment.processor_revision"
             ),
@@ -1249,7 +1265,7 @@ class RolloutSpec:
             "rollout.episodes",
         )
         seeds = [
-            _integer(v, "rollout.seeds[]")
+            _json_safe_integer(v, "rollout.seeds[]")
             for v in _list(data.get("seeds", []), "rollout.seeds")
         ]
         if seeds and len(seeds) != episodes:
@@ -1258,7 +1274,7 @@ class RolloutSpec:
             )
         return cls(
             episodes=episodes,
-            root_seed=_integer(
+            root_seed=_json_safe_integer(
                 _require(data, "root_seed", "rollout"), "rollout.root_seed"
             ),
             vector_width=_at_most(
@@ -1298,11 +1314,8 @@ class RolloutSpec:
 
 @dataclass(frozen=True)
 class PlacementSpec:
-    topology: str
     simulator_resources: RuntimeResources
-    policy_resources: RuntimeResources
     coordinator_resources: RuntimeResources
-    gpu_sharing: bool = False
     provider: Optional[str] = None
 
     @classmethod
@@ -1310,31 +1323,17 @@ class PlacementSpec:
         _strict_keys(
             data,
             {
-                "topology",
                 "simulator_resources",
-                "policy_resources",
                 "coordinator_resources",
-                "gpu_sharing",
                 "provider",
             },
             "placement",
         )
         return cls(
-            topology=_choice(
-                _require(data, "topology", "placement"),
-                PLACEMENT_TOPOLOGIES,
-                "placement.topology",
-            ),
             simulator_resources=RuntimeResources.from_dict(
                 _mapping(
                     _require(data, "simulator_resources", "placement"),
                     "placement.simulator_resources",
-                )
-            ),
-            policy_resources=RuntimeResources.from_dict(
-                _mapping(
-                    _require(data, "policy_resources", "placement"),
-                    "placement.policy_resources",
                 )
             ),
             coordinator_resources=RuntimeResources.from_dict(
@@ -1343,7 +1342,6 @@ class PlacementSpec:
                     "placement.coordinator_resources",
                 )
             ),
-            gpu_sharing=_boolean(data.get("gpu_sharing", False), "placement.gpu_sharing"),
             provider=_optional_string(data.get("provider"), "placement.provider"),
         )
 
@@ -1576,21 +1574,6 @@ class RoboticsJobSpec:
             simulator.resources,
             "placement.simulator_resources",
         )
-        _validate_resources_cover(
-            placement.policy_resources,
-            policy.resources,
-            "placement.policy_resources",
-        )
-        if placement.gpu_sharing:
-            gpu_types = {
-                item.gpu_type
-                for item in (placement.simulator_resources, placement.policy_resources)
-                if item.gpu_count > 0 and item.gpu_type is not None
-            }
-            if len(gpu_types) > 1:
-                raise RobotContractError(
-                    "robotics job shared simulator/policy GPUs require compatible gpu_type values"
-                )
         return cls(
             schema_version=ROBOTICS_JOB_SCHEMA_VERSION,
             job_name=_string(_require(data, "job_name", "robotics job"), "robotics job.job_name"),
@@ -1614,36 +1597,26 @@ class RoboticsJobSpec:
 
     def runtime_resources(self) -> RuntimeResources:
         simulator = self.placement.simulator_resources
-        policy = self.placement.policy_resources
         coordinator = self.placement.coordinator_resources
-        gpu_count = coordinator.gpu_count + (
-            max(simulator.gpu_count, policy.gpu_count)
-            if self.placement.gpu_sharing
-            else simulator.gpu_count + policy.gpu_count
-        )
+        gpu_count = simulator.gpu_count + coordinator.gpu_count
         gpu_types = {
             item.gpu_type
-            for item in (simulator, policy, coordinator)
+            for item in (simulator, coordinator)
             if item.gpu_count > 0 and item.gpu_type is not None
         }
         shm_values = [
             item.shm_size_gb
-            for item in (simulator, policy, coordinator)
+            for item in (simulator, coordinator)
             if item.shm_size_gb is not None
         ]
         return RuntimeResources.from_dict(
             {
-                "cpu_cores": simulator.cpu_cores
-                + policy.cpu_cores
-                + coordinator.cpu_cores,
-                "memory_gb": simulator.memory_gb
-                + policy.memory_gb
-                + coordinator.memory_gb,
-                "disk_gb": simulator.disk_gb + policy.disk_gb + coordinator.disk_gb,
+                "cpu_cores": simulator.cpu_cores + coordinator.cpu_cores,
+                "memory_gb": simulator.memory_gb + coordinator.memory_gb,
+                "disk_gb": simulator.disk_gb + coordinator.disk_gb,
                 "gpu_count": gpu_count,
                 "timeout_seconds": max(
                     simulator.timeout_seconds,
-                    policy.timeout_seconds,
                     coordinator.timeout_seconds,
                 ),
                 **({"gpu_type": next(iter(gpu_types))} if len(gpu_types) == 1 else {}),

@@ -9,6 +9,12 @@ from zipfile import ZipFile
 
 from cybernetics.lib.credentials import resolve_api_key, resolve_base_url
 
+from .experiments import (
+    ROBOTICS_CATALOG_SCHEMA_VERSION,
+    RoboticsBenchmarkTemplate,
+    RoboticsPreflight,
+    experiment_request,
+)
 from .runtime_contracts import AssetBundleRef, RoboticsJobSpec
 
 DEFAULT_BASE_URL = "https://api.cyberneticphysics.com"
@@ -45,6 +51,7 @@ class RobotEvalsClient:
         job: RoboticsJobSpec,
         *,
         budget_usd_limit: Optional[float] = None,
+        expected_job_hash: Optional[str] = None,
         ci_context: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -55,7 +62,104 @@ class RobotEvalsClient:
             if budget_usd_limit <= 0:
                 raise RobotEvalsError("budget_usd_limit must be positive")
             payload["budgetUsdLimit"] = float(budget_usd_limit)
+        if expected_job_hash is not None:
+            if expected_job_hash != job.job_hash():
+                raise RobotEvalsError("expected_job_hash does not match the normalized job")
+            payload["expectedJobHash"] = expected_job_hash
         return self._request("POST", "/v1/eval/runs", json_body=payload)
+
+    def list_benchmarks(self) -> list[RoboticsBenchmarkTemplate]:
+        body = self._request("GET", "/v1/eval/robotics/catalog")
+        if body.get("schemaVersion") != ROBOTICS_CATALOG_SCHEMA_VERSION:
+            raise RobotEvalsError("robotics benchmark catalog has an unsupported schema version")
+        return [
+            RoboticsBenchmarkTemplate.from_dict(item)
+            for item in _object_list(body.get("items"), "list robotics benchmarks")
+        ]
+
+    def get_benchmark(self, benchmark_id: str) -> RoboticsBenchmarkTemplate:
+        for benchmark in self.list_benchmarks():
+            if benchmark.id == benchmark_id:
+                return benchmark
+        raise RobotEvalsError(f"robotics benchmark not found: {benchmark_id}")
+
+    def compose(
+        self,
+        benchmark_id: str,
+        *,
+        policy_id: Optional[str] = None,
+        episode_start: int = 0,
+        episodes: Optional[int] = None,
+        root_seed: Optional[int] = None,
+        vector_width: Optional[int] = None,
+        max_steps: Optional[int] = None,
+        job_name: Optional[str] = None,
+        video: Optional[bool] = None,
+        observations: Optional[bool] = None,
+        actions: Optional[bool] = None,
+        predictions: Optional[bool] = None,
+        failure_clips: Optional[bool] = None,
+        dataset_export: Optional[str] = None,
+        budget_usd_limit: Optional[float] = None,
+    ) -> RoboticsPreflight:
+        """Compose and preflight one benchmark episode shard on the control plane."""
+
+        benchmark = self.get_benchmark(benchmark_id)
+        policy = benchmark.policy(policy_id)
+        experiment = experiment_request(
+            benchmark_id=benchmark.id,
+            policy_id=policy.id,
+            episode_start=episode_start,
+            episodes=episodes,
+            root_seed=root_seed,
+            vector_width=vector_width,
+            max_steps=max_steps,
+            job_name=job_name,
+            video=video,
+            observations=observations,
+            actions=actions,
+            predictions=predictions,
+            failure_clips=failure_clips,
+            dataset_export=dataset_export,
+        )
+        payload: dict[str, Any] = {"experiment": experiment}
+        if budget_usd_limit is not None:
+            if budget_usd_limit <= 0:
+                raise RobotEvalsError("budget_usd_limit must be positive")
+            payload["budgetUsdLimit"] = float(budget_usd_limit)
+        return RoboticsPreflight.from_dict(
+            self._request("POST", "/v1/eval/robotics/preflight", json_body=payload)
+        )
+
+    def preflight(
+        self,
+        job: RoboticsJobSpec,
+        *,
+        budget_usd_limit: Optional[float] = None,
+    ) -> RoboticsPreflight:
+        payload: dict[str, Any] = {"job": job.to_dict()}
+        if budget_usd_limit is not None:
+            if budget_usd_limit <= 0:
+                raise RobotEvalsError("budget_usd_limit must be positive")
+            payload["budgetUsdLimit"] = float(budget_usd_limit)
+        return RoboticsPreflight.from_dict(
+            self._request("POST", "/v1/eval/robotics/preflight", json_body=payload)
+        )
+
+    def submit_preflight(
+        self,
+        preflight: RoboticsPreflight,
+        *,
+        budget_usd_limit: Optional[float] = None,
+        ci_context: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        job = preflight.require_launchable_job()
+        return self.submit(
+            job,
+            budget_usd_limit=budget_usd_limit,
+            expected_job_hash=preflight.job_hash,
+            ci_context=ci_context,
+        )
 
     def list_runs(self) -> list[dict[str, Any]]:
         body = self._request("GET", "/v1/eval/runs")

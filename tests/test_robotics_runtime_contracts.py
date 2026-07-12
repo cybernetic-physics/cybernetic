@@ -21,6 +21,9 @@ from cybernetics.robotics import (
     SimulatorPackageSpec,
     SimulatorServiceDescriptor,
     TaskPackageSpec,
+    validate_component_descriptors,
+    validate_policy_descriptor,
+    validate_simulator_descriptor,
 )
 
 
@@ -172,15 +175,7 @@ def job_dict(*, vectorized: bool = True) -> dict[str, Any]:
             },
         },
         "placement": {
-            "topology": "colocated_required",
             "simulator_resources": simulator_dict(vectorized=vectorized)["resources"],
-            "policy_resources": {
-                "cpu_cores": 1,
-                "memory_gb": 1,
-                "disk_gb": 1,
-                "gpu_count": 0,
-                "timeout_seconds": 3600,
-            },
             "coordinator_resources": {
                 "cpu_cores": 1,
                 "memory_gb": 1,
@@ -188,7 +183,6 @@ def job_dict(*, vectorized: bool = True) -> dict[str, Any]:
                 "gpu_count": 0,
                 "timeout_seconds": 3600,
             },
-            "gpu_sharing": False,
         },
         "recording": {
             "video": True,
@@ -218,9 +212,15 @@ def test_robotics_job_round_trips_and_resolves_seed_tree() -> None:
     assert job.rollout.resolved_seeds() == [41, 42]
     assert len(job.job_hash()) == 64
     assert job.simulator.default_vector_width == 2
+    assert job.runtime_resources().cpu_cores == 5
     assert "gpu_type" not in job.runtime_resources().to_dict()
     assert "normalization_id" not in job.to_dict()["policy"]["action_spec"]
     assert "units" not in job.to_dict()["task"]["action_spec"]["tensor"]
+
+    unsafe_seed = job_dict()
+    unsafe_seed["rollout"]["root_seed"] = 1 << 53
+    with pytest.raises(RobotContractError, match="JSON-safe"):
+        RoboticsJobSpec.from_dict(unsafe_seed)
 
 
 def test_runtime_service_descriptors_round_trip_without_transport_dependencies() -> None:
@@ -262,6 +262,23 @@ def test_runtime_service_descriptors_round_trip_without_transport_dependencies()
 
     assert SimulatorServiceDescriptor.from_dict(simulator.to_dict()) == simulator
     assert PolicyServiceDescriptor.from_dict(policy.to_dict()) == policy
+    validate_simulator_descriptor(job, simulator)
+    validate_policy_descriptor(job, policy)
+    validate_component_descriptors(job, simulator, policy)
+    with pytest.raises(RobotServiceContractError, match="simulator vector width"):
+        validate_simulator_descriptor(
+            job,
+            SimulatorServiceDescriptor.from_dict(
+                {**simulator.to_dict(), "vector_width": job.rollout.vector_width + 1}
+            ),
+        )
+    with pytest.raises(RobotServiceContractError, match="policy deployment id"):
+        validate_policy_descriptor(
+            job,
+            PolicyServiceDescriptor.from_dict(
+                {**policy.to_dict(), "policy_deployment_id": "wrong-policy"}
+            ),
+        )
     with pytest.raises(RobotServiceContractError, match="protocol_version"):
         SimulatorServiceDescriptor.from_dict(
             {**simulator.to_dict(), "protocol_version": "sim-service/v2"}
@@ -274,7 +291,7 @@ def test_robotics_job_v1_has_cross_language_canonical_hash_and_composed_boundari
     job = RoboticsJobSpec.from_dict(job_dict())
     serialized = job.to_dict()
 
-    assert job.job_hash() == "a76036151879cb85ffb5c97d3cb31f1a3aa0deda839d41e25611eff0b2137490"
+    assert job.job_hash() == "47d81b02174b7183708a6744015612bc8e2c8aef7203598750c90a62d3a34868"
     assert {"environment", "episodes", "resources"}.isdisjoint(serialized)
     assert {
         "asset_mounts",
@@ -285,6 +302,22 @@ def test_robotics_job_v1_has_cross_language_canonical_hash_and_composed_boundari
     }.isdisjoint(serialized["simulator"])
     assert serialized["task"]["license"] == "R2R research license"
     assert serialized["policy"]["deployment_id"] == "wlp-fixture-nav"
+    assert {"topology", "policy_resources", "gpu_sharing"}.isdisjoint(serialized["placement"])
+
+
+@pytest.mark.parametrize("obsolete_field", ["topology", "policy_resources", "gpu_sharing"])
+def test_robotics_job_rejects_obsolete_policy_placement_fields(obsolete_field: str) -> None:
+    data = job_dict()
+    data["placement"][obsolete_field] = {
+        "cpu_cores": 1,
+        "memory_gb": 1,
+        "disk_gb": 1,
+        "gpu_count": 0,
+        "timeout_seconds": 3600,
+    }
+
+    with pytest.raises(RobotContractError, match="unknown fields"):
+        RoboticsJobSpec.from_dict(data)
 
 
 def test_worldlines_policy_endpoints_and_credentials_are_not_manifest_fields() -> None:
@@ -293,6 +326,12 @@ def test_worldlines_policy_endpoints_and_credentials_are_not_manifest_fields() -
     data["policy"]["config"] = {"url": "https://policy.invalid", "token": "secret"}
 
     with pytest.raises(RobotContractError, match="control-plane resolved"):
+        RoboticsJobSpec.from_dict(data)
+
+    data = job_dict()
+    data["policy"]["source"] = "worldlines"
+    data["policy"]["checkpoint_ref"] = "cybernetics://worldlines/checkpoints/invalid"
+    with pytest.raises(RobotContractError, match="worldlines://"):
         RoboticsJobSpec.from_dict(data)
 
 
