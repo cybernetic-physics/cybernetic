@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,12 +12,60 @@ from pydantic import ValidationError
 from cybernetics import types
 from cybernetics._compat import model_dump
 from cybernetics._models import construct_type
+from cybernetics.lib.public_interfaces.api_future import AwaitableConcurrentFuture
 from cybernetics.lib.public_interfaces.sampling_client import SamplingClient
 from cybernetics.resources.service import _model_dump_omit_none
 
 
 def _tensor(data: list[int] | list[float], dtype: str, shape: list[int]) -> types.TensorData:
     return types.TensorData(data=data, dtype=dtype, shape=shape)
+
+
+def test_compute_logprobs_omits_continuous_policy_conditioning() -> None:
+    observed_request_kinds: list[str] = []
+
+    class _FakeRetryHandler:
+        async def execute(self, coro_func):
+            return await coro_func()
+
+    class _FakeHolder:
+        def get_telemetry(self):
+            return None
+
+        def run_coroutine_threadsafe(self, coro):
+            future: Future[list[float | None]] = Future()
+            future.set_result(asyncio.run(coro))
+            return AwaitableConcurrentFuture(future)
+
+    client = object.__new__(SamplingClient)
+    client.holder = _FakeHolder()
+    client.retry_handler = _FakeRetryHandler()
+    client._sampling_client_sidecar_handle = None
+    client._request_id_counter = 0
+
+    async def _fake_sample_async_impl(
+        self,
+        prompt,
+        conditioning,
+        num_samples,
+        sampling_params,
+        include_prompt_logprobs,
+        topk_prompt_logprobs=0,
+        *,
+        request_id,
+        request_kind="sample",
+    ):
+        assert conditioning is None
+        assert request_id == 0
+        observed_request_kinds.append(request_kind)
+        return SimpleNamespace(prompt_logprobs=[0.1, 0.2])
+
+    client._sample_async_impl = MethodType(_fake_sample_async_impl, client)
+
+    result = client.compute_logprobs(types.ModelInput.from_ints([1, 2])).result()
+
+    assert result == [0.1, 0.2]
+    assert observed_request_kinds == ["compute_logprobs"]
 
 
 def test_create_sampling_session_omits_null_model_path_for_base_model() -> None:

@@ -582,6 +582,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         async def _compute_logprobs_async() -> list[float | None]:
             sample_res = await self._sample_async_impl(
                 prompt,
+                None,
                 num_samples=1,
                 sampling_params=types.SamplingParams(max_tokens=1),
                 include_prompt_logprobs=True,
