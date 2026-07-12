@@ -15,8 +15,11 @@ from .env import RobotEnv, VectorRobotEnv
 from .gymnasium import GymnasiumRobotEnvAdapter, GymnasiumVectorEnvAdapter
 from .runtime_contracts import (
     ActionChunk,
+    ActionSpec,
     PolicyDeploymentSpec,
     RoboticsJobSpec,
+    SimulatorPackageSpec,
+    TaskPackageSpec,
     TensorSpec,
 )
 from .runtime_services import (
@@ -187,8 +190,6 @@ class HostedWorldlinesPolicyClient:
             else _indices(indices, self._descriptor.batch_size)
         )
         for index in targets:
-            self._sequence_ids[index] = self._new_sequence_id(index)
-            self._last_step_ids[index] = -1
             self._pending_reset[index] = True
 
     def act(
@@ -230,12 +231,14 @@ class HostedWorldlinesPolicyClient:
         if response.action_chunk is None:
             raise RobotComponentError("Worldlines sampler returned no action_chunk")
         values = response.action_chunk.to_numpy()
-        produced_horizon = _validate_action_shape(
+        produced_horizon = _validate_action_chunk(
             values,
             batch_size=width,
-            action_shape=self.spec.action_spec.tensor.shape,
+            action_spec=self.spec.action_spec,
             max_horizon=self.spec.max_horizon,
         )
+        policy_timing = response.policy_timing or {}
+        inference_ms = policy_timing.get("inference_ms")
         self._last_step_ids = normalized_steps
         self._pending_reset = [False] * width
         return ActionChunk(
@@ -243,9 +246,11 @@ class HostedWorldlinesPolicyClient:
             representation=self.spec.action_spec.representation,
             requested_horizon=self.spec.action_spec.horizon,
             produced_horizon=produced_horizon,
-            inference_latency_ms=round_trip_ms,
+            inference_latency_ms=inference_ms,
             auxiliary={
                 "policy_transport": "cybernetics_sampling_v1",
+                "policy_service_round_trip_ms": round_trip_ms,
+                "policy_queue_latency_ms": policy_timing.get("queue_ms"),
                 "sampling_session_id": self._sampling_client.sampling_session_id,
                 "sequence_ids": list(self._sequence_ids),
                 "step_ids": list(normalized_steps),
@@ -282,9 +287,13 @@ class HostedWorldlinesPolicyClient:
 def open_simulator_component(job: RoboticsJobSpec) -> LocalSimulatorComponent:
     """Construct, readiness-check, and own the simulator selected by ``job``."""
 
-    environment = _load_environment(job)
+    environment = load_robot_environment(
+        job.simulator,
+        job.task,
+        vector_width=job.rollout.vector_width,
+    )
     try:
-        _check_environment_readiness(job, environment)
+        check_robot_environment_readiness(job.simulator, environment)
         return LocalSimulatorComponent(job, environment)
     except Exception:
         environment.close()
@@ -301,8 +310,15 @@ def open_worldlines_policy_component(
     return HostedWorldlinesPolicyClient.connect(job, run_id=run_id)
 
 
-def _load_environment(job: RoboticsJobSpec) -> Any:
-    factory = job.simulator.factory
+def load_robot_environment(
+    simulator: SimulatorPackageSpec,
+    task: TaskPackageSpec,
+    *,
+    vector_width: int,
+) -> Any:
+    """Construct one manifest-selected environment without owning its lifecycle."""
+
+    factory = simulator.factory
     if factory.kind == "gymnasium":
         try:
             import gymnasium as gym
@@ -310,51 +326,52 @@ def _load_environment(job: RoboticsJobSpec) -> Any:
             raise RobotComponentError(
                 "Gymnasium environment requested but gymnasium is not installed"
             ) from exc
-        kwargs = {**factory.kwargs, **job.task.adapter_config}
-        if job.rollout.vector_width > 1 and factory.vectorization == "sync":
+        kwargs = {**factory.kwargs, **task.adapter_config}
+        if vector_width > 1 and factory.vectorization == "sync":
             native = gym.vector.SyncVectorEnv(
-                [
-                    partial(gym.make, factory.target, **kwargs)
-                    for _ in range(job.rollout.vector_width)
-                ]
+                [partial(gym.make, factory.target, **kwargs) for _ in range(vector_width)]
             )
         else:
-            if job.rollout.vector_width > 1:
-                kwargs["num_envs"] = job.rollout.vector_width
+            if vector_width > 1:
+                kwargs["num_envs"] = vector_width
             native = gym.make(factory.target, **kwargs)
     elif factory.kind in {"python", "lerobot_envhub"}:
         native = _load_callable(factory.target)(
-            simulator=job.simulator,
-            task=job.task,
-            vector_width=job.rollout.vector_width,
+            simulator=simulator,
+            task=task,
+            vector_width=vector_width,
             **factory.kwargs,
         )
     else:  # pragma: no cover - contract parsing rejects unknown kinds
         raise RobotComponentError(f"unsupported environment factory kind {factory.kind!r}")
 
-    if job.rollout.vector_width > 1:
+    if vector_width > 1:
         if isinstance(native, VectorRobotEnv):
-            if native.num_envs != job.rollout.vector_width:
+            if native.num_envs != vector_width:
                 native.close()
                 raise RobotComponentError(
-                    f"factory returned num_envs={native.num_envs}, "
-                    f"expected {job.rollout.vector_width}"
+                    f"factory returned num_envs={native.num_envs}, expected {vector_width}"
                 )
             return native
-        adapter = GymnasiumVectorEnvAdapter(native, backend_id=job.simulator.simulator)
-        if adapter.num_envs != job.rollout.vector_width:
+        adapter = GymnasiumVectorEnvAdapter(native, backend_id=simulator.simulator)
+        if adapter.num_envs != vector_width:
             adapter.close()
             raise RobotComponentError(
-                f"factory returned num_envs={adapter.num_envs}, expected {job.rollout.vector_width}"
+                f"factory returned num_envs={adapter.num_envs}, expected {vector_width}"
             )
         return adapter
     if isinstance(native, RobotEnv):
         return native
-    return GymnasiumRobotEnvAdapter(native, backend_id=job.simulator.simulator)
+    return GymnasiumRobotEnvAdapter(native, backend_id=simulator.simulator)
 
 
-def _check_environment_readiness(job: RoboticsJobSpec, environment: Any) -> None:
-    readiness = job.simulator.readiness
+def check_robot_environment_readiness(
+    simulator: SimulatorPackageSpec,
+    environment: Any,
+) -> None:
+    """Apply the package readiness contract to a constructed environment."""
+
+    readiness = simulator.readiness
     if readiness.kind == "factory":
         return
     method = getattr(environment, readiness.target or "", None)
@@ -413,11 +430,18 @@ def _policy_conditioning(
                 shape=list(array.shape),
             )
             continue
-        if array.dtype.kind not in {"b", "f", "i", "u"}:
-            raise RobotComponentError(
-                f"Worldlines policy observation {name!r} must be numeric; got {array.dtype}"
-            )
+        _validate_tensor_dtype_and_bounds(
+            array,
+            spec,
+            where=f"Worldlines policy observation {name!r}",
+        )
         conditioning[name] = types.TensorData.from_numpy(array)
+        if str(array.dtype) not in {"float32", "int64"}:
+            conditioning[f"{name}.__dtype__"] = types.TextData(
+                data=[str(array.dtype)],
+                dtype="utf8",
+                shape=[1],
+            )
     return conditioning
 
 
@@ -436,6 +460,9 @@ def _step_ids(
     for index, step_id in enumerate(normalized):
         if step_id < 0:
             raise RobotComponentError("policy step_ids must be nonnegative")
+        if pending_reset[index] and previous[index] >= 0 and step_id <= previous[index]:
+            normalized[index] = previous[index] + 1
+            continue
         if not pending_reset[index] and step_id <= previous[index]:
             raise RobotComponentError("policy step_ids must increase monotonically per lane")
     return normalized
@@ -461,15 +488,16 @@ def _indices(indices: Sequence[int], width: int) -> list[int]:
     return normalized
 
 
-def _validate_action_shape(
+def _validate_action_chunk(
     values: Any,
     *,
     batch_size: int,
-    action_shape: Sequence[int],
+    action_spec: ActionSpec,
     max_horizon: int,
 ) -> int:
-    shape = tuple(int(size) for size in np.asarray(values).shape)
-    expected_suffix = tuple(action_shape)
+    array = np.asarray(values)
+    shape = tuple(int(size) for size in array.shape)
+    expected_suffix = tuple(action_spec.tensor.shape)
     if len(shape) != len(expected_suffix) + 2:
         raise RobotComponentError(
             "Worldlines action_chunk must have shape [batch, horizon, *action_shape]"
@@ -481,7 +509,28 @@ def _validate_action_shape(
         )
     if shape[1] <= 0 or shape[1] > max_horizon:
         raise RobotComponentError("Worldlines action_chunk horizon exceeds deployment limits")
+    _validate_tensor_dtype_and_bounds(
+        array,
+        action_spec.tensor,
+        where="Worldlines action_chunk",
+    )
     return shape[1]
+
+
+def _validate_tensor_dtype_and_bounds(values: Any, spec: TensorSpec, *, where: str) -> None:
+    array = np.asarray(values)
+    if array.dtype.kind not in {"b", "f", "i", "u"}:
+        raise RobotComponentError(f"{where} must be numeric; got {array.dtype}")
+    if str(array.dtype) != spec.dtype:
+        raise RobotComponentError(f"{where} has dtype {array.dtype}, expected {spec.dtype}")
+    if array.size == 0:
+        return
+    if array.dtype.kind == "f" and not np.isfinite(array).all():
+        raise RobotComponentError(f"{where} contains non-finite values")
+    if spec.bounds is None:
+        return
+    if array.min() < spec.bounds[0] or array.max() > spec.bounds[1]:
+        raise RobotComponentError(f"{where} violates bounds [{spec.bounds[0]}, {spec.bounds[1]}]")
 
 
 def _cancel_owned_session(service_client: Any) -> None:
@@ -501,7 +550,9 @@ def _policy_descriptor(job: RoboticsJobSpec) -> PolicyServiceDescriptor:
         state_model=spec.state_model,
         reset_granularity=spec.reset_granularity,
         deterministic=spec.deterministic,
-        observation_schema={name: value.to_dict() for name, value in spec.observation_schema.items()},
+        observation_schema={
+            name: value.to_dict() for name, value in spec.observation_schema.items()
+        },
         action_spec=spec.action_spec.to_dict(),
         transport="cybernetics_sampling_v1",
     )
@@ -511,6 +562,8 @@ __all__ = [
     "HostedWorldlinesPolicyClient",
     "LocalSimulatorComponent",
     "RobotComponentError",
+    "check_robot_environment_readiness",
+    "load_robot_environment",
     "open_simulator_component",
     "open_worldlines_policy_component",
 ]

@@ -16,6 +16,8 @@ from .client import RobotEvalsClient, RobotEvalsError
 from .components import (
     LocalSimulatorComponent,
     RobotComponentError,
+    check_robot_environment_readiness,
+    load_robot_environment,
     open_simulator_component,
     open_worldlines_policy_component,
 )
@@ -195,12 +197,14 @@ __all__ = [
     "build_cosmos_world_model_payload",
     "build_worldlines_training_payload",
     "canonical_runtime_json",
+    "check_robot_environment_readiness",
     "create_synthetic_dataset_from_world_model",
     "create_vla_eval_record",
     "default_action",
     "create_trajectory_dataset_from_runs",
     "deterministic_run_id",
     "experiment_request",
+    "load_robot_environment",
     "open_simulator_component",
     "open_worldlines_policy_component",
     "run_robot_episode",

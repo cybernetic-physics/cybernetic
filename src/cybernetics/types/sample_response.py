@@ -1,4 +1,4 @@
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from typing_extensions import Literal
 
@@ -41,3 +41,6 @@ class SampleResponse(BaseModel):
 
     predicted_video: Optional[TensorData] = None
     """Alias field for future-video predictions from continuous-policy runtimes."""
+
+    policy_timing: Optional[Dict[str, float]] = None
+    """Server-measured policy queue and inference timing in milliseconds."""

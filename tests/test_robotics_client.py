@@ -152,6 +152,7 @@ def test_benchmark_compose_preflight_and_hash_bound_submit() -> None:
     with RobotEvalsClient() as client:
         prepared = client.compose(
             "internnav-r2r-val-unseen",
+            deployment_id="wlp-cma-ready",
             episode_start=40,
             episodes=8,
             vector_width=2,
@@ -165,11 +166,39 @@ def test_benchmark_compose_preflight_and_hash_bound_submit() -> None:
     compose_payload = json.loads(preflight.calls[0].request.content)
     assert compose_payload["experiment"]["benchmarkId"] == "internnav-r2r-val-unseen"
     assert compose_payload["experiment"]["policyId"] == "cma"
+    assert compose_payload["experiment"]["deploymentId"] == "wlp-cma-ready"
     assert compose_payload["experiment"]["episodeShard"] == {"start": 40, "count": 8}
     assert compose_payload["experiment"]["evidence"]["predictions"] is True
     submit_payload = json.loads(submit.calls[0].request.content)
     assert submit_payload["expectedJobHash"] == job.job_hash()
     assert catalog.called and preflight.called and submit.called
+
+
+@respx.mock
+def test_register_and_list_hosted_policy_deployments() -> None:
+    payload = job_dict()["policy"]
+    payload["source"] = "worldlines"
+    payload["checkpoint_ref"] = "worldlines://run/sampler_weights/checkpoint"
+    policy = RoboticsJobSpec.from_dict({**job_dict(), "policy": payload}).policy
+    create = respx.post(f"{BASE}/v1/eval/robotics/policy-deployments").mock(
+        return_value=httpx.Response(
+            201,
+            json={"id": policy.deployment_id, "status": "ready", "snapshot": policy.to_dict()},
+        )
+    )
+    listing = respx.get(f"{BASE}/v1/eval/robotics/policy-deployments").mock(
+        return_value=httpx.Response(
+            200,
+            json={"items": [{"id": policy.deployment_id, "status": "ready"}]},
+        )
+    )
+
+    with RobotEvalsClient() as client:
+        assert client.register_policy_deployment(policy, status="ready")["status"] == "ready"
+        assert client.list_policy_deployments()[0]["id"] == policy.deployment_id
+
+    assert json.loads(create.calls[0].request.content)["policy"] == policy.to_dict()
+    assert listing.called
 
 
 @respx.mock

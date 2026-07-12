@@ -36,17 +36,13 @@ class RoboticsPolicyTemplate:
             id=_string(data.get("id"), "catalog policy.id"),
             name=_string(data.get("name"), "catalog policy.name"),
             model_id=_string(data.get("modelId"), "catalog policy.modelId"),
-            runtime_family=_string(
-                data.get("runtimeFamily"), "catalog policy.runtimeFamily"
-            ),
+            runtime_family=_string(data.get("runtimeFamily"), "catalog policy.runtimeFamily"),
             source=_choice(
                 data.get("source"), {"fixture", "worldlines", "local"}, "catalog policy.source"
             ),
             status=_choice(data.get("status"), _CATALOG_STATUSES, "catalog policy.status"),
             description=_string(data.get("description"), "catalog policy.description"),
-            requirements=_string_tuple(
-                data.get("requirements", []), "catalog policy.requirements"
-            ),
+            requirements=_string_tuple(data.get("requirements", []), "catalog policy.requirements"),
         )
 
 
@@ -94,9 +90,7 @@ class RoboticsBenchmarkTemplate:
             status=_choice(data.get("status"), _CATALOG_STATUSES, "catalog benchmark.status"),
             tags=_string_tuple(data.get("tags", []), "catalog benchmark.tags"),
             simulator=_mapping(data.get("simulator"), "catalog benchmark.simulator"),
-            primary_metric=_string(
-                data.get("primaryMetric"), "catalog benchmark.primaryMetric"
-            ),
+            primary_metric=_string(data.get("primaryMetric"), "catalog benchmark.primaryMetric"),
             native_metrics=_string_tuple(
                 data.get("nativeMetrics", []), "catalog benchmark.nativeMetrics"
             ),
@@ -210,7 +204,9 @@ class RoboticsPreflight:
                 for check in self.checks
                 if check.status == "blocked"
             )
-            raise RobotContractError(f"robotics preflight is not launchable: {blocked or 'unknown'}")
+            raise RobotContractError(
+                f"robotics preflight is not launchable: {blocked or 'unknown'}"
+            )
         return self.job
 
 
@@ -218,6 +214,7 @@ def experiment_request(
     *,
     benchmark_id: str,
     policy_id: str,
+    deployment_id: Optional[str] = None,
     episode_start: int = 0,
     episodes: Optional[int] = None,
     root_seed: Optional[int] = None,
@@ -298,6 +295,8 @@ def experiment_request(
         "rollout": rollout,
         "evidence": evidence,
     }
+    if deployment_id is not None:
+        request["deploymentId"] = _string(deployment_id, "deployment_id")
     if job_name is not None:
         request["jobName"] = _string(job_name, "job_name")
     return request

@@ -16,7 +16,7 @@ from .experiments import (
     RoboticsPreflight,
     experiment_request,
 )
-from .runtime_contracts import AssetBundleRef, RoboticsJobSpec
+from .runtime_contracts import AssetBundleRef, PolicyDeploymentSpec, RoboticsJobSpec
 
 DEFAULT_BASE_URL = "https://api.cyberneticphysics.com"
 
@@ -84,11 +84,36 @@ class RobotEvalsClient:
                 return benchmark
         raise RobotEvalsError(f"robotics benchmark not found: {benchmark_id}")
 
+    def list_policy_deployments(self) -> list[dict[str, Any]]:
+        """List authoritative hosted policy snapshots in the active workspace."""
+
+        body = self._request("GET", "/v1/eval/robotics/policy-deployments")
+        return _object_list(body.get("items"), "list robotics policy deployments")
+
+    def register_policy_deployment(
+        self,
+        policy: PolicyDeploymentSpec,
+        *,
+        status: str = "setup_required",
+    ) -> dict[str, Any]:
+        """Register or update readiness for one immutable Worldlines policy snapshot."""
+
+        if policy.source != "worldlines":
+            raise RobotEvalsError("only Worldlines policies are hosted deployments")
+        if status not in {"setup_required", "ready", "disabled"}:
+            raise RobotEvalsError("policy deployment status is invalid")
+        return self._request(
+            "POST",
+            "/v1/eval/robotics/policy-deployments",
+            json_body={"policy": policy.to_dict(), "status": status},
+        )
+
     def compose(
         self,
         benchmark_id: str,
         *,
         policy_id: Optional[str] = None,
+        deployment_id: Optional[str] = None,
         episode_start: int = 0,
         episodes: Optional[int] = None,
         root_seed: Optional[int] = None,
@@ -110,6 +135,7 @@ class RobotEvalsClient:
         experiment = experiment_request(
             benchmark_id=benchmark.id,
             policy_id=policy.id,
+            deployment_id=deployment_id,
             episode_start=episode_start,
             episodes=episodes,
             root_seed=root_seed,
@@ -227,8 +253,10 @@ class RobotEvalsClient:
 
         run = self.get_run(run_id)
         episodes = _object_list(run.get("episodes"), "promote robotics run episodes")
-        if run.get("status") != "completed" or not episodes or any(
-            episode.get("status") != "succeeded" for episode in episodes
+        if (
+            run.get("status") != "completed"
+            or not episodes
+            or any(episode.get("status") != "succeeded" for episode in episodes)
         ):
             raise RobotEvalsError("only a completed all-passing robotics shard can be promoted")
         job = _run_job(run)
