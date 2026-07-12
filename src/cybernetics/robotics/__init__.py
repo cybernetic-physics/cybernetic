@@ -13,6 +13,12 @@ from .artifacts import (
     write_trajectory_dataset_artifact,
 )
 from .client import RobotEvalsClient, RobotEvalsError
+from .components import (
+    LocalSimulatorComponent,
+    RobotComponentError,
+    open_simulator_component,
+    open_worldlines_policy_component,
+)
 from .contracts import (
     ROBOT_DATASET_SCHEMA_VERSION,
     ROBOT_POLICY_SCHEMA_VERSION,
@@ -133,12 +139,14 @@ __all__ = [
     "GymnasiumRobotEnvAdapter",
     "GymnasiumVectorEnvAdapter",
     "LocoMuJoCoRobotEnv",
+    "LocalSimulatorComponent",
     "PolicyArtifact",
     "PolicyDeploymentSpec",
     "PolicyServiceClient",
     "PolicyServiceDescriptor",
     "ReplayImportRequest",
     "RobotContractError",
+    "RobotComponentError",
     "RobotServiceContractError",
     "RobotEvalsClient",
     "RobotEvalsError",
@@ -193,6 +201,8 @@ __all__ = [
     "create_trajectory_dataset_from_runs",
     "deterministic_run_id",
     "experiment_request",
+    "open_simulator_component",
+    "open_worldlines_policy_component",
     "run_robot_episode",
     "runtime_contract_hash",
     "stable_hash",

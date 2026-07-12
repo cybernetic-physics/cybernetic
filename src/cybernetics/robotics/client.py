@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
@@ -168,6 +169,81 @@ class RobotEvalsClient:
     def get_run(self, run_id: str) -> dict[str, Any]:
         return self._request("GET", f"/v1/eval/runs/{run_id}")
 
+    def rerun(
+        self,
+        run_id: str,
+        *,
+        budget_usd_limit: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Re-preflight and queue the exact immutable manifest from ``run_id``."""
+
+        job = _run_job(self.get_run(run_id))
+        prepared = self.preflight(job, budget_usd_limit=budget_usd_limit)
+        return self.submit_preflight(prepared, budget_usd_limit=budget_usd_limit)
+
+    def preflight_next_shard(
+        self,
+        run_id: str,
+        *,
+        episodes: Optional[int] = None,
+        budget_usd_limit: Optional[float] = None,
+    ) -> RoboticsPreflight:
+        """Resolve the next absolute benchmark shard from a prior run."""
+
+        job = _next_shard_job(_run_job(self.get_run(run_id)), episodes=episodes)
+        return self.preflight(job, budget_usd_limit=budget_usd_limit)
+
+    def compare(
+        self,
+        base_run_id: str,
+        candidate_run_id: str,
+        *,
+        name: Optional[str] = None,
+        visibility: str = "private",
+    ) -> dict[str, Any]:
+        """Create a server-validated comparison between compatible runs."""
+
+        if visibility not in {"private", "workspace"}:
+            raise RobotEvalsError("comparison visibility must be private or workspace")
+        return self._request(
+            "POST",
+            "/v1/eval/compares",
+            json_body={
+                "name": name or f"{base_run_id} vs {candidate_run_id}",
+                "baseRunId": base_run_id,
+                "candidateRunId": candidate_run_id,
+                "visibility": visibility,
+            },
+        )
+
+    def promote_to_behavior_ci(
+        self,
+        run_id: str,
+        *,
+        budget_usd_limit: Optional[float] = None,
+        ci_context: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Queue a passing immutable robotics shard through CI admission."""
+
+        run = self.get_run(run_id)
+        episodes = _object_list(run.get("episodes"), "promote robotics run episodes")
+        if run.get("status") != "completed" or not episodes or any(
+            episode.get("status") != "succeeded" for episode in episodes
+        ):
+            raise RobotEvalsError("only a completed all-passing robotics shard can be promoted")
+        job = _run_job(run)
+        context = {"promotedFromRunId": run_id, **dict(ci_context or {})}
+        payload: dict[str, Any] = {
+            "job": job.to_dict(),
+            "expectedJobHash": job.job_hash(),
+            "ciContext": context,
+        }
+        if budget_usd_limit is not None:
+            if budget_usd_limit <= 0:
+                raise RobotEvalsError("budget_usd_limit must be positive")
+            payload["budgetUsdLimit"] = float(budget_usd_limit)
+        return self._request("POST", "/v1/eval/runs/ci", json_body=payload)
+
     def list_events(self, run_id: str) -> list[dict[str, Any]]:
         body = self.get_run(run_id)
         return _object_list(body.get("events"), "list eval run events")
@@ -313,6 +389,48 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _run_job(run: Mapping[str, Any]) -> RoboticsJobSpec:
+    manifest = run.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise RobotEvalsError("eval run does not contain a robotics-job/v1 manifest")
+    try:
+        return RoboticsJobSpec.from_dict(manifest)
+    except Exception as exc:
+        raise RobotEvalsError("eval run does not contain a valid robotics-job/v1 manifest") from exc
+
+
+def _next_shard_job(
+    job: RoboticsJobSpec,
+    *,
+    episodes: Optional[int],
+) -> RoboticsJobSpec:
+    payload = copy.deepcopy(job.to_dict())
+    metadata = payload.get("metadata")
+    experiment = metadata.get("experiment") if isinstance(metadata, dict) else None
+    shard = experiment.get("episode_shard") if isinstance(experiment, dict) else None
+    if not isinstance(shard, dict):
+        raise RobotEvalsError("eval run is missing benchmark episode-shard metadata")
+    previous_start = shard.get("start")
+    previous_count = shard.get("count")
+    if not isinstance(previous_start, int) or not isinstance(previous_count, int):
+        raise RobotEvalsError("eval run has invalid benchmark episode-shard metadata")
+    count = previous_count if episodes is None else int(episodes)
+    if count <= 0:
+        raise RobotEvalsError("episodes must be positive")
+    start = previous_start + previous_count
+    if start + count > 100_000:
+        raise RobotEvalsError("next episode shard exceeds benchmark episode 99999")
+    rollout = payload["rollout"]
+    root_seed = rollout["root_seed"]
+    rollout["episodes"] = count
+    rollout["seeds"] = [root_seed + start + index for index in range(count)]
+    experiment["episode_shard"] = {"start": start, "count": count}
+    payload["job_name"] = (
+        f"{experiment['benchmark_id']}-{experiment['policy_id']}-s{start}-n{count}"
+    )
+    return RoboticsJobSpec.from_dict(payload)
 
 
 def _inspect_zip(path: Path) -> dict[str, int]:

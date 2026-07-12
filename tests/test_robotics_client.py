@@ -17,7 +17,7 @@ from cybernetics.robotics import (
     RoboticsJobSpec,
     RoboticsPreflight,
 )
-from cybernetics.robotics.client import _inspect_zip
+from cybernetics.robotics.client import _inspect_zip, _next_shard_job
 
 BASE = "https://api.test"
 
@@ -242,3 +242,65 @@ def test_asset_zip_inspection_rejects_empty_and_duplicate_archives(tmp_path) -> 
 def test_composition_client_exposes_robotics_namespace() -> None:
     with Client() as client:
         assert isinstance(client.robotics, RobotEvalsClient)
+
+
+def test_next_shard_preserves_benchmark_lineage_and_resolves_absolute_seeds() -> None:
+    payload = job_dict()
+    payload["rollout"]["seeds"] = [45, 46]
+    payload["metadata"]["experiment"] = {
+        "schema_version": "robotics-experiment/v1",
+        "benchmark_id": "internnav-r2r-val-unseen",
+        "benchmark_version": "r2r-val-unseen-v1",
+        "policy_id": "cma",
+        "episode_shard": {"start": 4, "count": 2},
+    }
+
+    next_job = _next_shard_job(RoboticsJobSpec.from_dict(payload), episodes=3)
+
+    assert next_job.rollout.seeds == [47, 48, 49]
+    assert next_job.metadata["experiment"]["episode_shard"] == {"start": 6, "count": 3}
+    assert next_job.metadata["experiment"]["benchmark_version"] == "r2r-val-unseen-v1"
+
+
+@respx.mock
+def test_compare_uses_server_compatibility_validation() -> None:
+    route = respx.post(f"{BASE}/v1/eval/compares").mock(
+        return_value=httpx.Response(200, json={"id": "evcmp_1"})
+    )
+
+    with RobotEvalsClient() as client:
+        result = client.compare("evrun_base", "evrun_candidate")
+
+    assert result["id"] == "evcmp_1"
+    assert json.loads(route.calls[0].request.content) == {
+        "name": "evrun_base vs evrun_candidate",
+        "baseRunId": "evrun_base",
+        "candidateRunId": "evrun_candidate",
+        "visibility": "private",
+    }
+
+
+@respx.mock
+def test_promote_to_behavior_ci_requires_and_submits_passing_immutable_job() -> None:
+    job = RoboticsJobSpec.from_dict(job_dict())
+    respx.get(f"{BASE}/v1/eval/runs/evrun_pass").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "evrun_pass",
+                "status": "completed",
+                "manifest": job.to_dict(),
+                "episodes": [{"status": "succeeded"}, {"status": "succeeded"}],
+            },
+        )
+    )
+    promoted = respx.post(f"{BASE}/v1/eval/runs/ci").mock(
+        return_value=httpx.Response(200, json={"id": "evrun_ci"})
+    )
+
+    with RobotEvalsClient() as client:
+        assert client.promote_to_behavior_ci("evrun_pass")["id"] == "evrun_ci"
+
+    payload = json.loads(promoted.calls[0].request.content)
+    assert payload["expectedJobHash"] == job.job_hash()
+    assert payload["ciContext"] == {"promotedFromRunId": "evrun_pass"}

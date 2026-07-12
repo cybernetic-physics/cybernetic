@@ -107,6 +107,7 @@ from .telemetry_response import TelemetryResponse as TelemetryResponse
 from .telemetry_send_request import TelemetrySendRequest as TelemetrySendRequest
 from .tensor_data import TensorData as TensorData
 from .tensor_dtype import TensorDtype as TensorDtype
+from .text_data import TextData as TextData
 from .training_run import TrainingRun as TrainingRun
 from .training_runs_response import TrainingRunsResponse as TrainingRunsResponse
 from .unhandled_exception_event import UnhandledExceptionEvent as UnhandledExceptionEvent

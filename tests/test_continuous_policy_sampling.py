@@ -44,6 +44,7 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
         policy_mode="native",
         include_predicted_video=True,
         conditioning={
+            "instruction": types.TextData(data=["turn left"], dtype="utf8", shape=[1, 1]),
             "images": _tensor([0, 1, 2], "int64", [1, 1, 1, 3]),
             "state": _tensor([0.5, -0.5], "float32", [1, 2]),
             "state_mask": _tensor([1], "int64", [1]),
@@ -64,6 +65,11 @@ def test_sample_request_carries_continuous_policy_conditioning() -> None:
     assert body["conditioning"]["state"]["data"] == [0.5, -0.5]
     assert body["policy_mode"] == "native"
     assert body["include_predicted_video"] is True
+    assert body["conditioning"]["instruction"] == {
+        "data": ["turn left"],
+        "dtype": "utf8",
+        "shape": [1, 1],
+    }
     assert body["policy_context"] == {
         "sequence_ids": ["episode-000001"],
         "step_ids": [7],
