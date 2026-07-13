@@ -67,3 +67,16 @@ def test_pi0_droid_sampling_example_validates_observation_without_network(tmp_pa
 
     assert "observation_valid=true" in result.stdout
     assert "remote_run=false" in result.stdout
+
+
+def test_pi0_droid_sampling_example_does_not_offer_unsupported_seed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "examples/pi0_droid_sampling.py", "--help"],
+        cwd=root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "--seed" not in result.stdout
