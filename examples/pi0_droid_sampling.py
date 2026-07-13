@@ -46,7 +46,7 @@ def main() -> None:
             base_model="pi0-droid",
             timeout=args.timeout,
         )
-        response = sampler.sample_droid(observation, seed=args.seed).result(timeout=args.timeout)
+        response = sampler.sample_droid(observation).result(timeout=args.timeout)
         actions = _require_action_chunk(response)
         np.save(args.output, actions, allow_pickle=False)
         print(
@@ -133,7 +133,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--project-id", default=os.environ.get("CYBERNETICS_PROJECT_ID"))
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--cleanup-timeout", type=float, default=180)
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--validate-only", action="store_true", help="Validate input without API work."
     )
