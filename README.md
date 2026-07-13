@@ -197,6 +197,39 @@ The base robotics package is designed to import without sim, Isaac, ROS2,
 MuJoCo, Worldlines, or Cosmos runtime packages installed. Heavy backend
 execution belongs behind backend adapters, not in the package import path.
 
+## PI0 DROID inference
+
+`pi0-droid` is an inference-only hosted policy. It accepts one typed raw DROID
+observation and returns one action chunk with shape `[H, 8]`: seven absolute
+joint-position targets followed by one gripper target. Authenticate with
+`cybernetics auth login` or `CYBERNETICS_API_KEY`, then sample it through the
+normal `ServiceClient`:
+
+```python
+import cybernetics
+from cybernetics import types
+
+observation = types.DroidObservation.from_numpy(
+    exterior_image_0_left=exterior_rgb,
+    exterior_image_1_left=second_exterior_rgb,
+    wrist_image_left=wrist_rgb,
+    joint_position=joint_position,
+    gripper_position=gripper_position,
+    instruction="pick up the cube",
+)
+
+service = cybernetics.ServiceClient(project_id="robotics-lab")
+sampler = service.create_sampling_client(base_model="pi0-droid", timeout=900)
+result = sampler.sample_droid(observation).result(timeout=900)
+actions = result.action_chunk.to_numpy()
+```
+
+This endpoint produces exactly one native-policy sample per call. It does not
+support SDE trajectories, predicted video, LoRA/full training,
+`forward_backward`, or `optim_step`. Do not confuse `pi0-droid` with the
+separate trainable `pi0.5` backend. A complete NPZ-to-action-file program is in
+[`examples/pi0_droid_sampling.py`](examples/pi0_droid_sampling.py).
+
 ## DreamZero examples
 
 The repository ships an SDK-native DreamZero SFT smoke at

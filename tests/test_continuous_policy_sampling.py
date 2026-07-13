@@ -157,6 +157,7 @@ def test_sample_response_preserves_continuous_policy_artifacts() -> None:
     response = types.SampleResponse(
         sequences=[],
         action_chunk=_tensor([0.1, 0.2], "float32", [1, 2]),
+        policy_metadata={"action_space": "droid_joint_position"},
         trajectory=[{"x_t": _tensor([0.3], "float32", [1])}],
         video=_tensor([1, 2, 3], "int64", [1, 1, 1, 3]),
         predicted_video=_tensor([4, 5, 6], "int64", [1, 1, 1, 3]),
@@ -165,6 +166,7 @@ def test_sample_response_preserves_continuous_policy_artifacts() -> None:
     assert response.action_chunk is not None
     assert response.action_chunk.shape == [1, 2]
     assert response.action_chunk.data == [0.1, 0.2]
+    assert response.policy_metadata == {"action_space": "droid_joint_position"}
     assert response.trajectory is not None
     assert response.trajectory[0]["x_t"].data == [0.3]
     assert response.video is not None

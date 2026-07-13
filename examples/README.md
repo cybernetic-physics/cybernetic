@@ -8,6 +8,12 @@ models on the hosted Worldlines / Cybernetics control plane through the
 forward_backward([datum], loss_fn)  ->  optim_step(adam)  ->  save_state(name)
 ```
 
+PI0 DROID serving is deliberately outside that training contract. The
+inference-only `pi0-droid` model accepts a typed `DroidObservation` and returns
+one `[H, 8]` chunk of absolute DROID joint-position/gripper targets. It does not
+support SDE, predicted video, LoRA/full training, `forward_backward`, or
+`optim_step`.
+
 The CLIENT builds a per-model `collate` dict locally (tokenization, image stacks,
 normalized actions), encodes it into ONE `Datum` per sample with that model's
 serde, and ships it over the wire. The runtime decodes the `Datum` back into the
@@ -54,6 +60,7 @@ Treat these as smoke-level signals on synthetic fixtures, not benchmark claims.
 
 | Script                       | Backend           | Notes                                                       |
 | ---------------------------- | ----------------- | ----------------------------------------------------------- |
+| `pi0_droid_sampling.py`      | `pi0-droid`       | authenticated typed DROID inference; no training            |
 | `dreamzero_sft_smoke.py`     | `dreamzero-droid` | LoRA-SFT smoke (the template all others mirror)             |
 | `dreamzero_rl_smoke.py`      | `dreamzero-droid` | flow-RWR / PPO RL smoke (world-model + trajectory tensors)  |
 | `groot_sft_smoke.py`         | `groot-n1.5`      | reuses the dreamzero serde + synthetic DROID collate        |
@@ -62,6 +69,29 @@ Treat these as smoke-level signals on synthetic fixtures, not benchmark claims.
 | `flywheel_demo.py`           | `cosmos3-nano` + `groot-n1.5` | the synthetic-data flywheel slice               |
 | `finetune_on_real_data.py`   | `groot-n1.5`      | TEMPLATE: finetune on a real LeRobot dataset                |
 | `push_checkpoint_to_hf.py`   | —                 | upload a saved checkpoint to a HuggingFace repo             |
+
+## PI0 DROID sampling
+
+Capture one DROID observation as an NPZ file with keys
+`exterior_image_0_left`, `exterior_image_1_left`, `wrist_image_left`,
+`joint_position`, and `gripper_position`. The images must be `H x W x 3` uint8
+RGB arrays; the state contains seven joints and one gripper value.
+
+```bash
+cybernetics auth login
+python pi0_droid_sampling.py observation.npz \
+  --instruction "pick up the cube" \
+  --output pi0-actions.npy
+```
+
+Validate a captured observation without authentication, network work, or GPU
+allocation:
+
+```bash
+python pi0_droid_sampling.py observation.npz \
+  --instruction "pick up the cube" \
+  --validate-only
+```
 
 ## Local-vs-remote pattern
 
