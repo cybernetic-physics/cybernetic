@@ -183,6 +183,7 @@ def test_launch_environment_ref_without_version_omits_null_base_version() -> Non
     request_body = json.loads(session_route.calls[0].request.content)
     assert request_body["envId"] == "env_demo"
     assert "baseVersionId" not in request_body
+    assert "runtimeProvider" not in request_body
 
 
 @respx.mock
