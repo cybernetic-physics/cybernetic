@@ -186,6 +186,23 @@ def test_launch_environment_ref_without_version_omits_null_base_version() -> Non
 
 
 @respx.mock
+def test_launch_passes_explicit_runtime_provider() -> None:
+    session_route = respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(200, json={"sessionId": "sess_demo", "status": "queued"})
+    )
+
+    with SimulationClient() as client:
+        result = client.launch(
+            "cybernetics://envs/env_demo/versions/ver_demo",
+            runtime_provider="vast",
+        )
+
+    assert result.session_id == "sess_demo"
+    request_body = json.loads(session_route.calls[0].request.content)
+    assert request_body["runtimeProvider"] == "vast"
+
+
+@respx.mock
 def test_wait_for_session_accepts_public_session_readiness_shape() -> None:
     respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
         return_value=httpx.Response(

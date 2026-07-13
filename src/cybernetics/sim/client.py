@@ -370,6 +370,7 @@ class SimulationClient:
         root_stage: str | None = None,
         workspace_id: str | None = None,
         gpu_spec: str | None = None,
+        runtime_provider: Literal["vast", "warm_pool"] | None = None,
         max_runtime_minutes: int | None = None,
         idle_timeout_minutes: int | None = None,
         wait: bool = False,
@@ -396,6 +397,8 @@ class SimulationClient:
             body["workspaceId"] = workspace_id
         if gpu_spec:
             body["gpuSpec"] = gpu_spec
+        if runtime_provider:
+            body["runtimeProvider"] = runtime_provider
         if max_runtime_minutes:
             body["maxRuntimeMinutes"] = max_runtime_minutes
         if idle_timeout_minutes:
