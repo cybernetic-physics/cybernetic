@@ -413,18 +413,19 @@ class ServiceClient(TelemetryProvider):
         retry_config: RetryConfig | None = None,
         timeout: float | None = None,
     ) -> SamplingClient:
-        """Create a SamplingClient for text generation.
+        """Create a SamplingClient for token or continuous-policy inference.
 
         Args:
         - `model_path`: Path to saved model weights (e.g., "worldlines://run-id/weights/checkpoint-001")
-        - `base_model`: Name of base model to use (e.g., "Qwen/Qwen3-8B"). If `model_path`
+        - `base_model`: Name of base model to use (e.g., "Qwen/Qwen3-8B" or
+          "pi0-droid"). If `model_path`
           is also provided, the checkpoint path takes precedence and the backend infers the
           base model from that checkpoint.
         - `retry_config`: Optional configuration for retrying failed requests
         - `timeout`: Optional seconds to wait for sampler creation/cold start.
 
         Returns:
-        - `SamplingClient` configured for text generation
+        - `SamplingClient` configured for the selected model
 
         Raises:
             ValueError: If neither model_path nor base_model is provided

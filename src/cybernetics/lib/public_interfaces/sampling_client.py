@@ -141,8 +141,10 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         shadow: bool = False,
         retry_config: RetryConfig | None = None,
         subprocess_sampling: bool | None = None,
+        base_model: str | None = None,
     ):
         self.holder = holder
+        self._base_model = base_model
 
         # Create retry handler with the provided configuration
         self.retry_handler = _get_retry_handler(
@@ -197,7 +199,10 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 model_path=model_path, base_model=base_model
             )
         return SamplingClient(
-            holder, sampling_session_id=sampling_session_id, retry_config=retry_config
+            holder,
+            sampling_session_id=sampling_session_id,
+            retry_config=retry_config,
+            base_model=base_model,
         )
 
     @staticmethod
@@ -398,7 +403,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         - `conditioning`: Optional continuous-policy tensors such as DreamZero
           RGB/state/mask/embodiment inputs.
         - `droid_observation`: Raw three-camera DROID observation. The hosted
-          DreamZero backend owns its transforms and returns robot-space actions.
+          policy owns its transforms and returns robot-space actions.
         - `policy_mode`: `native` for causal joint action/video serving or `sde`
           for a recorded RL trajectory.
         - `include_predicted_video`: Return one bounded video latent from the
@@ -498,12 +503,20 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         include_predicted_video: bool = False,
         seed: int | None = None,
     ) -> ConcurrentFuture[types.SampleResponse]:
-        """Sample DreamZero from a raw DROID observation.
+        """Sample a hosted DROID policy from a raw robot observation.
 
-        The result's `action_chunk` is in DROID robot space with seven joint
-        positions followed by one gripper value. Native mode is intended for
-        environment control; SDE mode additionally records flow-RL artifacts.
+        The result's `action_chunk` is in DROID robot space with seven absolute
+        joint-position values followed by one normalized gripper value. Hosted
+        ``pi0-droid`` supports native inference only; ``dreamzero-droid`` also
+        supports SDE mode and predicted video.
         """
+        if getattr(self, "_base_model", None) == "pi0-droid":
+            if policy_mode != "native":
+                raise ValueError("pi0-droid supports only policy_mode='native'")
+            if include_predicted_video:
+                raise ValueError("pi0-droid does not produce predicted video")
+            if seed is not None:
+                raise ValueError("pi0-droid does not support deterministic seed")
         return self.sample(
             prompt=types.ModelInput.empty(),
             droid_observation=observation,

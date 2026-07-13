@@ -1,4 +1,4 @@
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from typing_extensions import Literal
 
@@ -31,7 +31,10 @@ class SampleResponse(BaseModel):
     """
 
     action_chunk: Optional[TensorData] = None
-    """Continuous action chunk returned by a policy sampler such as DreamZero."""
+    """Continuous action chunk returned by a hosted policy sampler."""
+
+    policy_metadata: Optional[dict[str, Any]] = None
+    """Loaded policy profile and action-space provenance, when supplied."""
 
     trajectory: Optional[list[PolicyTrajectoryStep]] = None
     """Per-step continuous-policy rollout artifacts used by RL losses."""

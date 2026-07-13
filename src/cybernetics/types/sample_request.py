@@ -33,7 +33,7 @@ class SampleRequest(StrictBase):
     """
 
     droid_observation: Optional[DroidObservation] = None
-    """Raw DROID observation for server-owned DreamZero policy transforms."""
+    """Raw DROID observation for transforms owned by the selected policy backend."""
 
     policy_mode: Optional[Literal["native", "sde"]] = None
     """Continuous-policy mode: native causal serving or recorded SDE rollout."""
