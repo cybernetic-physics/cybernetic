@@ -161,7 +161,11 @@ def test_missing_camera_raises() -> None:
 
     with pytest.raises(IsaacSessionError, match="camera"):
         with IsaacSessionAdapter(
-            base_url=BASE, api_key="cp_live_x", session=_cfg(), poll_interval_seconds=0
+            base_url=BASE,
+            api_key="cp_live_x",
+            session=_cfg(),
+            poll_interval_seconds=0,
+            isaac_ready_timeout=0,
         ) as a:
             a.prepare(_scene())
 
