@@ -12,14 +12,26 @@ from cybernetics.lib.credentials import resolve_api_key, resolve_base_url
 
 from .errors import SimulationError
 from .mcp import SessionMCPClient
-from .packaging import AssetPackage, detect_gaussian_splat_format, package_local_asset
+from .packaging import (
+    AssetPackage,
+    AssetPackageError,
+    detect_gaussian_splat_format,
+    package_local_asset,
+    validate_hosted_splat_ply,
+)
 
 DEFAULT_BASE_URL = "https://api.cyberneticphysics.com"
 SIMULATION_ASSET_REF_SCHEMA_VERSION = "simulation-asset-ref/v1"
 _READY_STATUSES = {"running", "idle"}
 _TERMINAL_STATUSES = {"failed", "terminated", "stopped", "error", "snapshot_failed"}
-_JOB_SUCCESS_STATUSES = {"succeeded"}
-_JOB_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+_JOB_SUCCESS_STATUSES = {"completed", "succeeded"}
+_JOB_TERMINAL_STATUSES = {
+    "completed",
+    "succeeded",
+    "failed",
+    "canceled",
+    "cancelled",
+}
 _SPLAT_UPLOAD_CONTENT_TYPE = "application/octet-stream"
 _STOP_ACCEPTED_STATUSES = (_TERMINAL_STATUSES - {"snapshot_failed"}) | {"stopping"}
 _SESSION_TRANSIENT_STATUS_CODES = {502, 503, 504}
@@ -316,7 +328,7 @@ class SimulationClient:
             if _is_gaussian_splat_kind(package.asset_kind):
                 raise SimulationError(
                     f"{package.asset_kind} is {package.compatibility_status}; hosted Isaac "
-                    "sessions render NuRec USDZ, not raw splat files. Convert it first with "
+                    "sessions render ParticleField USDZ, not raw splat files. Convert it first with "
                     "`cybernetics splat upload <file> --convert --wait`, then launch the "
                     "exported USDZ artifact."
                 )
@@ -329,7 +341,7 @@ class SimulationClient:
 
         # Gaussian splats upload as environment versions even though they are
         # needs_conversion: the bundle is the durable source artifact the
-        # platform converts to NuRec USDZ. Other non-renderable kinds keep the
+        # platform converts to ParticleField USDZ. Other non-renderable kinds keep the
         # package-local behavior.
         if package.compatibility_status != "ready_to_render" and not _is_gaussian_splat_kind(
             package.asset_kind
@@ -616,6 +628,15 @@ class SimulationClient:
                 f"{source.name} is not a recognized Gaussian splat (.ply with 3DGS "
                 "vertex properties, .spz, .splat, or .ksplat)"
             )
+        if splat_format != "ply":
+            raise SimulationError(
+                f"hosted splat conversion accepts only standard 3DGS .ply files; "
+                f"got .{splat_format}"
+            )
+        try:
+            validate_hosted_splat_ply(source)
+        except AssetPackageError as exc:
+            raise SimulationError(str(exc)) from exc
 
         presign = self._request(
             "POST",
@@ -651,10 +672,10 @@ class SimulationClient:
         max_hourly_price: float = 2.0,
         gpu_min_vram: int = 24,
     ) -> dict[str, Any]:
-        """Create a splat→NuRec-USDZ conversion job for an uploaded splat.
+        """Create a splat→ParticleField-USDZ conversion job for an uploaded PLY.
 
         The job runs the export-only path of the reconstruction pipeline
-        (3DGRUT ``ply_to_usd``); COLMAP and training are skipped.
+        (checksum-pinned OpenUSD converter); COLMAP and training are skipped.
         """
         return self._request(
             "POST",

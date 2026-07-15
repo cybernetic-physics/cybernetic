@@ -5,9 +5,9 @@ file or directory, infers the root simulation artifact, and emits a bounded zip
 bundle that the control plane can store as an environment version.
 
 Gaussian splats (3DGS ``.ply`` plus the ``.spz``/``.splat``/``.ksplat``
-containers) are recognized as first-class assets. They package and upload like
-any other bundle but stay ``needs_conversion`` until the platform converts them
-to NuRec USDZ, which is what hosted Isaac sessions can render.
+containers) are recognized as first-class local assets. They package like any
+other bundle but stay ``needs_conversion``. The hosted conversion API currently
+accepts only standard 3DGS PLY and emits an OpenUSD ParticleField USDZ.
 """
 
 from __future__ import annotations
@@ -33,6 +33,34 @@ GAUSSIAN_SPLAT_BINARY_EXTENSIONS = {".spz", ".splat", ".ksplat"}
 # all of these is a Gaussian splat, not a mesh scan.
 _GAUSSIAN_PLY_MARKER_PROPS = frozenset({"f_dc_0", "opacity", "scale_0", "rot_0"})
 _PLY_HEADER_MAX_BYTES = 64 * 1024
+HOSTED_SPLAT_MAX_BYTES = 256 * 1024 * 1024
+HOSTED_SPLAT_MAX_GAUSSIANS = 1_000_000
+HOSTED_SPLAT_MAX_VERTEX_PROPERTIES = 62
+_HOSTED_SPLAT_SUPPORTED_TYPES = frozenset({"float", "float32"})
+_HOSTED_SPLAT_REQUIRED_PROPS = frozenset(
+    {
+        "x",
+        "y",
+        "z",
+        "f_dc_0",
+        "f_dc_1",
+        "f_dc_2",
+        "opacity",
+        "scale_0",
+        "scale_1",
+        "scale_2",
+        "rot_0",
+        "rot_1",
+        "rot_2",
+        "rot_3",
+    }
+)
+_HOSTED_SPLAT_ALLOWED_PROPS = (
+    _HOSTED_SPLAT_REQUIRED_PROPS
+    | frozenset({"nx", "ny", "nz"})
+    | frozenset(f"f_rest_{index}" for index in range(45))
+)
+_HOSTED_SPLAT_VALID_REST_COUNTS = frozenset({0, 9, 24, 45})
 SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache"}
 MANIFEST_NAME = "cybernetics_sim_asset_manifest.json"
 
@@ -52,6 +80,102 @@ class AssetPackageError(ValueError):
     """The local asset could not be safely packaged."""
 
 
+@dataclass(frozen=True)
+class HostedSplatPly:
+    size_bytes: int
+    gaussian_count: int
+    property_count: int
+    spherical_harmonics_degree: int
+
+
+def validate_hosted_splat_ply(path: Path) -> HostedSplatPly:
+    """Fail before presign unless ``path`` meets the hosted converter contract."""
+    if path.suffix.lower() != ".ply" or not path.is_file():
+        raise AssetPackageError("hosted splat conversion requires one .ply file")
+    size_bytes = path.stat().st_size
+    if size_bytes <= 0:
+        raise AssetPackageError("hosted splat PLY must be non-empty")
+    if size_bytes > HOSTED_SPLAT_MAX_BYTES:
+        raise AssetPackageError("hosted splat PLY must not exceed 256 MiB")
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_PLY_HEADER_MAX_BYTES)
+    except OSError as exc:
+        raise AssetPackageError(f"could not read splat PLY: {path.name}") from exc
+    marker_offsets = [
+        offset
+        for marker in (b"end_header\n", b"end_header\r\n")
+        if (offset := raw.find(marker)) >= 0
+    ]
+    if not marker_offsets:
+        raise AssetPackageError("splat PLY header is missing end_header within 64 KiB")
+    try:
+        lines = raw[: min(marker_offsets)].decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise AssetPackageError("splat PLY header must be ASCII") from exc
+    if not lines or lines[0].strip() != "ply":
+        raise AssetPackageError("splat input is missing the PLY magic header")
+
+    ply_format = ""
+    gaussian_count: int | None = None
+    properties: list[str] = []
+    in_vertices = False
+    for raw_line in lines[1:]:
+        parts = raw_line.strip().split()
+        if not parts:
+            continue
+        if parts[0] == "format" and len(parts) >= 2:
+            ply_format = parts[1]
+        elif parts[0] == "element":
+            in_vertices = len(parts) == 3 and parts[1] == "vertex"
+            if in_vertices:
+                try:
+                    gaussian_count = int(parts[2])
+                except ValueError as exc:
+                    raise AssetPackageError("splat PLY Gaussian count must be an integer") from exc
+        elif parts[0] == "property" and in_vertices:
+            if (
+                len(parts) != 3
+                or parts[1] == "list"
+                or parts[1] not in _HOSTED_SPLAT_SUPPORTED_TYPES
+            ):
+                raise AssetPackageError(
+                    "hosted splat vertex properties must be scalar float or float32"
+                )
+            properties.append(parts[2])
+
+    if ply_format not in {"ascii", "binary_little_endian", "binary_big_endian"}:
+        raise AssetPackageError(f"unsupported splat PLY format: {ply_format or 'missing'}")
+    if gaussian_count is None or gaussian_count <= 0:
+        raise AssetPackageError("splat PLY must contain at least one Gaussian")
+    if gaussian_count > HOSTED_SPLAT_MAX_GAUSSIANS:
+        raise AssetPackageError("hosted splat PLY must not exceed 1,000,000 Gaussians")
+    if len(properties) > HOSTED_SPLAT_MAX_VERTEX_PROPERTIES:
+        raise AssetPackageError("hosted splat PLY must not exceed 62 vertex properties")
+    if len(set(properties)) != len(properties):
+        raise AssetPackageError("splat PLY vertex property names must be unique")
+    unsupported = sorted(set(properties).difference(_HOSTED_SPLAT_ALLOWED_PROPS))
+    if unsupported:
+        raise AssetPackageError(f"splat PLY contains unsupported vertex properties: {unsupported}")
+    missing = sorted(_HOSTED_SPLAT_REQUIRED_PROPS.difference(properties))
+    if missing:
+        raise AssetPackageError(f"splat PLY is missing required 3DGS properties: {missing}")
+    try:
+        rest_indices = sorted(
+            int(name.removeprefix("f_rest_")) for name in properties if name.startswith("f_rest_")
+        )
+    except ValueError as exc:
+        raise AssetPackageError("splat PLY f_rest suffixes must be integers") from exc
+    if len(rest_indices) not in _HOSTED_SPLAT_VALID_REST_COUNTS or rest_indices != list(
+        range(len(rest_indices))
+    ):
+        raise AssetPackageError(
+            "splat PLY f_rest properties must be contiguous for SH degree 0, 1, 2, or 3"
+        )
+    degree = {0: 0, 9: 1, 24: 2, 45: 3}[len(rest_indices)]
+    return HostedSplatPly(size_bytes, gaussian_count, len(properties), degree)
+
+
 def detect_gaussian_splat_format(path: Path) -> str | None:
     """Return the Gaussian-splat container format for ``path``, or ``None``.
 
@@ -69,7 +193,7 @@ def detect_gaussian_splat_format(path: Path) -> str | None:
     if header is None:
         return None
     properties, _ = header
-    return "ply" if _GAUSSIAN_PLY_MARKER_PROPS <= properties else None
+    return "ply" if properties >= _GAUSSIAN_PLY_MARKER_PROPS else None
 
 
 def _parse_ply_header(path: Path) -> tuple[frozenset[str], int | None] | None:
