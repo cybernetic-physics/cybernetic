@@ -130,6 +130,14 @@ proprioception from hosted Isaac, calls `sample_droid()` (or the lower-level
 continuous-policy sampling contract), and applies the returned action chunk to
 the same hosted session.
 
+Session readiness and cleanup tolerate brief control-plane gateway outages
+without hiding persistent failures. `wait_for_session()` and `stop_session()`
+make at most six attempts for HTTP 502, 503, or 504, using 1, 2, 4, 8, and 10
+second backoffs (25 seconds total). Other HTTP errors are not retried. If a stop
+receives HTTP 409, the SDK reads the session and treats the call as successful
+only when the stop was already accepted (`stopping`) or the session is ended;
+unrelated conflicts still raise `SimulationError`.
+
 `cybernetics.sim` owns asset packaging, import, preview, render, catalog, and
 launch helpers. `cybernetics.robotics` owns `RobotTaskSpec`, backend adapters,
 run records, policy artifacts, replay artifacts, datasets, and evaluation

@@ -227,6 +227,181 @@ def test_wait_for_session_accepts_public_session_readiness_shape() -> None:
     assert session["sessionId"] == "sess_demo"
 
 
+@respx.mock
+def test_wait_for_session_retries_only_bounded_transient_gateway_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    route = respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        side_effect=[
+            httpx.Response(502, json={"message": "bad gateway"}),
+            httpx.Response(503, json={"message": "unavailable"}),
+            httpx.Response(504, json={"message": "gateway timeout"}),
+            httpx.Response(
+                200,
+                json={
+                    "sessionId": "sess_demo",
+                    "status": "running",
+                    "runtimeStatus": "running",
+                },
+            ),
+        ]
+    )
+
+    with SimulationClient() as client:
+        session = client.wait_for_session("sess_demo", timeout_seconds=10)
+
+    assert session["status"] == "running"
+    assert route.call_count == 4
+    assert delays == [1.0, 2.0, 4.0]
+
+
+@respx.mock
+def test_wait_for_session_reports_exhausted_transient_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    route = respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(502, json={"message": "bad gateway"})
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(
+            SimulationError,
+            match=r"transient HTTP 502 after 6 attempts \(retry budget exhausted\)",
+        ):
+            client.wait_for_session("sess_demo", timeout_seconds=60)
+
+    assert route.call_count == 6
+    assert delays == [1.0, 2.0, 4.0, 8.0, 10.0]
+
+
+@respx.mock
+def test_wait_for_session_does_not_retry_client_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    route = respx.get(f"{BASE}/v1/sessions/sess_missing").mock(
+        return_value=httpx.Response(404, json={"message": "not found"})
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(SimulationError, match="failed with HTTP 404"):
+            client.wait_for_session("sess_missing", timeout_seconds=10)
+
+    assert route.call_count == 1
+    assert delays == []
+
+
+@respx.mock
+def test_wait_for_session_preserves_terminal_status_after_transient_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    route = respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        side_effect=[
+            httpx.Response(502, json={"message": "bad gateway"}),
+            httpx.Response(200, json={"sessionId": "sess_demo", "status": "failed"}),
+        ]
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(SimulationError, match="entered terminal status 'failed'"):
+            client.wait_for_session("sess_demo", timeout_seconds=10)
+
+    assert route.call_count == 2
+    assert delays == [1.0]
+
+
+@respx.mock
+def test_stop_session_retries_transient_gateway_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    route = respx.post(f"{BASE}/v1/sessions/sess_demo/stop").mock(
+        side_effect=[
+            httpx.Response(502, json={"message": "bad gateway"}),
+            httpx.Response(503, json={"message": "unavailable"}),
+            httpx.Response(204),
+        ]
+    )
+
+    with SimulationClient() as client:
+        client.stop_session("sess_demo")
+
+    assert route.call_count == 3
+    assert delays == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("verified_status", ["stopping", "terminated"])
+@respx.mock
+def test_stop_session_verifies_accepted_or_ended_state_after_lost_success_response(
+    monkeypatch: pytest.MonkeyPatch,
+    verified_status: str,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    stop_route = respx.post(f"{BASE}/v1/sessions/sess_demo/stop").mock(
+        side_effect=[
+            httpx.Response(502, json={"message": "bad gateway"}),
+            httpx.Response(
+                409,
+                json={
+                    "message": "Session cannot be stopped in its current state",
+                    "code": "CONFLICT",
+                },
+            ),
+        ]
+    )
+    status_route = respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": verified_status},
+        )
+    )
+
+    with SimulationClient() as client:
+        client.stop_session("sess_demo")
+
+    assert stop_route.call_count == 2
+    assert status_route.call_count == 1
+    assert delays == [1.0]
+
+
+@pytest.mark.parametrize("verified_status", ["queued", "snapshot_failed"])
+@respx.mock
+def test_stop_session_preserves_unrelated_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    verified_status: str,
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("cybernetics.sim.client.time.sleep", delays.append)
+    stop_route = respx.post(f"{BASE}/v1/sessions/sess_demo/stop").mock(
+        return_value=httpx.Response(
+            409,
+            json={
+                "message": "Session cannot be stopped in its current state",
+                "code": "CONFLICT",
+            },
+        )
+    )
+    status_route = respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": verified_status},
+        )
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(SimulationError, match="failed with HTTP 409"):
+            client.stop_session("sess_demo")
+
+    assert stop_route.call_count == 1
+    assert status_route.call_count == 1
+    assert delays == []
+
+
 def test_render_public_flag_is_explicitly_not_mvp(tmp_path) -> None:
     (tmp_path / "scene.usd").write_text("#usda 1.0\n")
 
