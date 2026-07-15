@@ -1,14 +1,16 @@
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing_extensions import Literal
 
 from .._compat import PYDANTIC_V2, ConfigDict
 from .._models import StrictBase
 from .droid_observation import DroidObservation
 from .model_input import ModelInput
+from .pi0_droid_dsrl_action import validate_pi0_initial_flow_noise
 from .policy_conditioning import PolicyConditioning
 from .sampling_params import SamplingParams
+from .tensor_data import TensorData
 
 __all__ = ["SampleRequest"]
 
@@ -34,6 +36,13 @@ class SampleRequest(StrictBase):
 
     droid_observation: Optional[DroidObservation] = None
     """Raw DROID observation for transforms owned by the selected policy backend."""
+
+    pi0_initial_flow_noise: Optional[TensorData] = None
+    """Advanced PI0-only ``[10, 32]`` initial flow-noise tensor.
+
+    DSRL callers should use ``SamplingClient.sample_droid(dsrl_action=...)`` so
+    the 32-dimensional controller action is expanded without ambiguity.
+    """
 
     policy_mode: Optional[Literal["native", "sde"]] = None
     """Continuous-policy mode: native causal serving or recorded SDE rollout."""
@@ -84,6 +93,16 @@ class SampleRequest(StrictBase):
     per-token logprob of each generated token. Off by default to save bandwidth."""
 
     type: Literal["sample"] = "sample"
+
+    @model_validator(mode="after")
+    def _validate_pi0_noise(self) -> "SampleRequest":
+        if self.pi0_initial_flow_noise is not None:
+            validate_pi0_initial_flow_noise(self.pi0_initial_flow_noise)
+            if self.droid_observation is None:
+                raise ValueError("pi0_initial_flow_noise requires droid_observation")
+            if self.base_model not in (None, "pi0-droid"):
+                raise ValueError("pi0_initial_flow_noise is supported only by pi0-droid")
+        return self
 
     if PYDANTIC_V2:
         # allow fields with a `model_` prefix
