@@ -249,13 +249,15 @@ class SimulationClient:
 
     def close(self) -> None:
         cleanup_error: Exception | None = None
+        revocation_pending: set[SessionMCPClient] = set()
         for mcp_client in tuple(self._mcp_clients):
             try:
                 mcp_client.close()
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
-        self._mcp_clients.clear()
-        if self._owns_client:
+                revocation_pending.add(mcp_client)
+        self._mcp_clients = revocation_pending
+        if self._owns_client and not revocation_pending:
             close = getattr(self._client, "close", None)
             if callable(close):
                 close()

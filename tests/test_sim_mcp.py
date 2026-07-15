@@ -252,10 +252,10 @@ def test_mcp_context_preserves_primary_error_when_revoke_is_unavailable() -> Non
 
     revoke = respx.delete(f"{BASE}/v1/api-keys/{KEY_ID}").mock(side_effect=fail_revoke)
 
-    with SimulationClient(api_key=ROOT_KEY, base_url=BASE) as client:
-        with pytest.raises(RuntimeError, match="primary failure") as exc_info:
-            with client.mcp_session(SESSION_ID) as mcp:
-                raise RuntimeError("primary failure")
+    client = SimulationClient(api_key=ROOT_KEY, base_url=BASE)
+    with pytest.raises(RuntimeError, match="primary failure") as exc_info:
+        with client.mcp_session(SESSION_ID) as mcp:
+            raise RuntimeError("primary failure")
 
     assert revoke.call_count == 1
     assert "closed=True" in repr(mcp)
@@ -263,6 +263,10 @@ def test_mcp_context_preserves_primary_error_when_revoke_is_unavailable() -> Non
         "SessionMCPClient cleanup failed after the primary error: "
         "ConnectError: revocation unavailable"
     ]
+
+    with pytest.raises(httpx.ConnectError, match="revocation unavailable"):
+        client.close()
+    assert revoke.call_count == 2
 
 
 @respx.mock
@@ -287,6 +291,71 @@ def test_simulation_context_preserves_primary_error_when_mcp_cleanup_fails() -> 
         "SimulationClient cleanup failed after the primary error: "
         "ConnectError: revocation unavailable"
     ]
+
+
+@respx.mock
+def test_mcp_context_propagates_cleanup_error_without_primary_error() -> None:
+    respx.post(f"{BASE}/v1/api-keys/session-scoped").mock(
+        return_value=httpx.Response(201, json=_grant())
+    )
+
+    def fail_revoke(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("revocation unavailable", request=request)
+
+    revoke = respx.delete(f"{BASE}/v1/api-keys/{KEY_ID}").mock(side_effect=fail_revoke)
+    client = SimulationClient(api_key=ROOT_KEY, base_url=BASE)
+
+    with pytest.raises(httpx.ConnectError, match="revocation unavailable"):
+        with client.mcp_session(SESSION_ID):
+            pass
+
+    assert revoke.call_count == 1
+
+
+@respx.mock
+def test_simulation_context_propagates_cleanup_error_without_primary_error() -> None:
+    respx.post(f"{BASE}/v1/api-keys/session-scoped").mock(
+        return_value=httpx.Response(201, json=_grant())
+    )
+
+    def fail_revoke(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("revocation unavailable", request=request)
+
+    revoke = respx.delete(f"{BASE}/v1/api-keys/{KEY_ID}").mock(side_effect=fail_revoke)
+
+    with pytest.raises(httpx.ConnectError, match="revocation unavailable"):
+        with SimulationClient(api_key=ROOT_KEY, base_url=BASE) as client:
+            client.mcp_session(SESSION_ID)
+
+    assert revoke.call_count == 1
+
+
+@respx.mock
+def test_failed_revocation_disables_calls_and_retries_until_confirmed() -> None:
+    respx.post(f"{BASE}/v1/api-keys/session-scoped").mock(
+        return_value=httpx.Response(201, json=_grant())
+    )
+    attempts = 0
+
+    def revoke_once_unavailable(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("revocation unavailable", request=request)
+        return httpx.Response(204)
+
+    revoke = respx.delete(f"{BASE}/v1/api-keys/{KEY_ID}").mock(side_effect=revoke_once_unavailable)
+    client = SimulationClient(api_key=ROOT_KEY, base_url=BASE)
+    mcp = client.mcp_session(SESSION_ID)
+
+    with pytest.raises(httpx.ConnectError, match="revocation unavailable"):
+        mcp.close()
+    with pytest.raises(SimulationMCPError, match="closed"):
+        mcp.call_tool("isaac.get_scene_info")
+
+    client.close()
+    client.close()
+    assert revoke.call_count == 2
 
 
 @respx.mock
