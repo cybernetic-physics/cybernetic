@@ -25,6 +25,7 @@ from .lazy_group import LazyGroup
         "doctor": "cybernetics.cli.commands.doctor:cli",
         "run": "cybernetics.cli.commands.run:cli",
         "sim": "cybernetics.cli.commands.sim:cli",
+        "splat": "cybernetics.cli.commands.splat:cli",
         "version": "cybernetics.cli.commands.version:cli",
     },
     context_settings=dict(help_option_names=["-h", "--help"]),

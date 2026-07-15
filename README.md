@@ -171,6 +171,30 @@ converter path lands. Public `/sim/<slug>` artifact pages are also future work;
 `cybernetics sim render --public` fails explicitly instead of pretending to
 publish a durable public artifact.
 
+### Gaussian splats
+
+Gaussian splats are first-class uploads. `.spz`/`.splat`/`.ksplat` are detected
+by extension; `.ply` is header-sniffed for the 3DGS vertex properties so a
+photogrammetry mesh PLY is not misclassified. Hosted Isaac sessions render
+NuRec USDZ — raw splat files stay `needs_conversion` until converted by the
+platform's export-only pipeline (3DGRUT `ply_to_usd`; no COLMAP, no training):
+
+```bash
+# upload + convert to NuRec USDZ + wait for the artifact
+cybernetics splat upload ./construction_site.ply --convert --wait
+
+# inspect/import also understand splats (uploads a needs_conversion bundle)
+cybernetics sim inspect ./construction_site.ply --format json
+cybernetics sim import ./construction_site.ply --name construction-site
+
+# then import + launch the exported USDZ like any USD asset
+cybernetics sim launch ./construction_site.usdz --wait
+```
+
+`cybernetics splat upload --wait` prints a presigned `usdz_download_url` when
+the conversion job succeeds; `cybernetics splat status <job_id>` polls an
+existing job. Conversion currently accepts `.ply` splats only.
+
 Uploaded bundle manifests intentionally avoid host-local absolute source paths.
 They keep safe provenance only: source basename, optional user-supplied
 `--source-url`, root stage, asset kind, compatibility status, and per-file

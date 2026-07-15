@@ -3,6 +3,11 @@
 This module owns the local-file boundary for ``cybernetics sim``. It accepts a
 file or directory, infers the root simulation artifact, and emits a bounded zip
 bundle that the control plane can store as an environment version.
+
+Gaussian splats (3DGS ``.ply`` plus the ``.spz``/``.splat``/``.ksplat``
+containers) are recognized as first-class assets. They package and upload like
+any other bundle but stay ``needs_conversion`` until the platform converts them
+to NuRec USDZ, which is what hosted Isaac sessions can render.
 """
 
 from __future__ import annotations
@@ -20,6 +25,14 @@ CompatibilityStatus = Literal["ready_to_render", "needs_root_stage", "needs_conv
 
 USD_STAGE_EXTENSIONS = {".usd", ".usda", ".usdc", ".usdz"}
 ROBOT_DESCRIPTION_EXTENSIONS = {".urdf", ".xacro", ".sdf", ".world", ".mjcf", ".xml"}
+# Binary Gaussian-splat containers are identified by extension alone; ``.ply``
+# is ambiguous (mesh vs 3DGS) and requires header sniffing.
+GAUSSIAN_SPLAT_BINARY_EXTENSIONS = {".spz", ".splat", ".ksplat"}
+# Per-vertex properties emitted by the INRIA 3DGS trainer (and everything
+# downstream of it: 3DGRUT, gsplat, Postshot, SuperSplat exports). A PLY with
+# all of these is a Gaussian splat, not a mesh scan.
+_GAUSSIAN_PLY_MARKER_PROPS = frozenset({"f_dc_0", "opacity", "scale_0", "rot_0"})
+_PLY_HEADER_MAX_BYTES = 64 * 1024
 SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", ".mypy_cache", ".pytest_cache"}
 MANIFEST_NAME = "cybernetics_sim_asset_manifest.json"
 
@@ -39,6 +52,76 @@ class AssetPackageError(ValueError):
     """The local asset could not be safely packaged."""
 
 
+def detect_gaussian_splat_format(path: Path) -> str | None:
+    """Return the Gaussian-splat container format for ``path``, or ``None``.
+
+    ``.spz``/``.splat``/``.ksplat`` are splat-only extensions. ``.ply`` is
+    sniffed: only files whose vertex element carries the 3DGS training
+    properties (``f_dc_0``, ``opacity``, ``scale_0``, ``rot_0``) qualify —
+    a photogrammetry mesh PLY does not.
+    """
+    suffix = path.suffix.lower()
+    if suffix in GAUSSIAN_SPLAT_BINARY_EXTENSIONS:
+        return suffix[1:]
+    if suffix != ".ply":
+        return None
+    header = _parse_ply_header(path)
+    if header is None:
+        return None
+    properties, _ = header
+    return "ply" if _GAUSSIAN_PLY_MARKER_PROPS <= properties else None
+
+
+def _parse_ply_header(path: Path) -> tuple[frozenset[str], int | None] | None:
+    """Parse a PLY header into (vertex property names, vertex count).
+
+    Returns ``None`` when the file is not a parseable PLY. Reads at most
+    ``_PLY_HEADER_MAX_BYTES`` so multi-GB splats stay cheap to inspect.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_PLY_HEADER_MAX_BYTES)
+    except OSError:
+        return None
+    end = raw.find(b"end_header")
+    if not raw.startswith(b"ply") or end < 0:
+        return None
+    lines = raw[:end].decode("ascii", errors="replace").splitlines()
+
+    properties: set[str] = set()
+    vertex_count: int | None = None
+    in_vertex_element = False
+    for line in lines[1:]:
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "element":
+            in_vertex_element = len(parts) >= 3 and parts[1] == "vertex"
+            if in_vertex_element:
+                try:
+                    vertex_count = int(parts[2])
+                except ValueError:
+                    vertex_count = None
+        elif parts[0] == "property" and in_vertex_element and len(parts) >= 3:
+            properties.add(parts[-1])
+    return frozenset(properties), vertex_count
+
+
+def _splat_manifest_info(root_path: Path | None) -> dict[str, Any] | None:
+    """Manifest/inspection metadata for a splat root artifact, if it is one."""
+    if root_path is None:
+        return None
+    splat_format = detect_gaussian_splat_format(root_path)
+    if splat_format is None:
+        return None
+    info: dict[str, Any] = {"format": splat_format}
+    if splat_format == "ply":
+        header = _parse_ply_header(root_path)
+        if header is not None and header[1] is not None:
+            info["gaussian_count"] = header[1]
+    return info
+
+
 @dataclass(frozen=True)
 class AssetInspection:
     source_path: Path
@@ -47,6 +130,7 @@ class AssetInspection:
     compatibility_status: CompatibilityStatus
     file_count: int
     total_size_bytes: int
+    splat: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +140,7 @@ class AssetInspection:
             "compatibility_status": self.compatibility_status,
             "file_count": self.file_count,
             "total_size_bytes": self.total_size_bytes,
+            "splat": self.splat,
         }
 
 
@@ -93,18 +178,22 @@ class AssetPackage:
         }
 
 
-def inspect_local_asset(path: str | os.PathLike[str], root_stage: str | None = None) -> AssetInspection:
+def inspect_local_asset(
+    path: str | os.PathLike[str], root_stage: str | None = None
+) -> AssetInspection:
     source = Path(path).expanduser().resolve()
     files = _collect_files(source)
     root_relpath = _resolve_root_relpath(source, files, root_stage)
-    asset_kind = _asset_kind(root_relpath)
+    root_path = _root_path(source, root_relpath)
+    asset_kind = _asset_kind(root_relpath, root_path)
     return AssetInspection(
         source_path=source,
         root_relpath=root_relpath,
         asset_kind=asset_kind,
-        compatibility_status=_compatibility(root_relpath),
+        compatibility_status=_compatibility(root_relpath, root_path),
         file_count=len(files),
         total_size_bytes=sum(file.stat().st_size for file in files),
+        splat=_splat_manifest_info(root_path),
     )
 
 
@@ -119,8 +208,9 @@ def package_local_asset(
     bundle_path, temporary = _resolve_output_path(source, output_path)
     files = _collect_files(source, exclude_paths={bundle_path})
     root_relpath = _resolve_root_relpath(source, files, root_stage)
-    asset_kind = _asset_kind(root_relpath)
-    compatibility = _compatibility(root_relpath)
+    root_path = _root_path(source, root_relpath)
+    asset_kind = _asset_kind(root_relpath, root_path)
+    compatibility = _compatibility(root_relpath, root_path)
     manifest = _build_manifest(
         source,
         files,
@@ -128,6 +218,7 @@ def package_local_asset(
         asset_kind,
         compatibility,
         source_url=source_url,
+        splat_info=_splat_manifest_info(root_path),
     )
 
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,12 +284,16 @@ def _resolve_root_relpath(source: Path, files: list[Path], explicit: str | None)
             raise AssetPackageError(f"root stage does not exist in asset bundle: {rel}")
         return rel
 
-    candidates = sorted((_archive_name(source, file) for file in files), key=_root_sort_key)
+    by_relpath = {_archive_name(source, file): file for file in files}
+    candidates = sorted(by_relpath, key=_root_sort_key)
     for rel in candidates:
         if Path(rel).suffix.lower() in USD_STAGE_EXTENSIONS:
             return rel
     for rel in candidates:
         if _is_robot_description_relpath(rel):
+            return rel
+    for rel in candidates:
+        if detect_gaussian_splat_format(by_relpath[rel]) is not None:
             return rel
     return None
 
@@ -230,9 +325,18 @@ def _root_sort_key(relpath: str) -> tuple[int, int, str]:
     return (len(path.parts), name_rank, relpath.lower())
 
 
-def _asset_kind(root_relpath: str | None) -> str:
+def _root_path(source: Path, root_relpath: str | None) -> Path | None:
+    if root_relpath is None:
+        return None
+    return source if source.is_file() else source / root_relpath
+
+
+def _asset_kind(root_relpath: str | None, root_path: Path | None = None) -> str:
     if root_relpath is None:
         return "asset_bundle"
+    splat_format = detect_gaussian_splat_format(root_path) if root_path else None
+    if splat_format is not None:
+        return f"gaussian_splat_{splat_format}"
     suffix = Path(root_relpath).suffix.lower()
     if suffix == ".usdz":
         return "usdz_package"
@@ -249,13 +353,15 @@ def _asset_kind(root_relpath: str | None) -> str:
     return "asset_bundle"
 
 
-def _compatibility(root_relpath: str | None) -> CompatibilityStatus:
+def _compatibility(root_relpath: str | None, root_path: Path | None = None) -> CompatibilityStatus:
     if root_relpath is None:
         return "needs_root_stage"
     suffix = Path(root_relpath).suffix.lower()
     if suffix in USD_STAGE_EXTENSIONS:
         return "ready_to_render"
     if _is_robot_description_relpath(root_relpath):
+        return "needs_conversion"
+    if root_path is not None and detect_gaussian_splat_format(root_path) is not None:
         return "needs_conversion"
     return "needs_root_stage"
 
@@ -284,11 +390,12 @@ def _build_manifest(
     compatibility: CompatibilityStatus,
     *,
     source_url: str | None = None,
+    splat_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_info = {"type": "local", "name": source.name}
     if source_url:
         source_info["url"] = source_url
-    return {
+    manifest: dict[str, Any] = {
         "schema": "cybernetics.sim.asset-bundle/v1",
         "source": source_info,
         "root_stage_relpath": root_relpath,
@@ -303,6 +410,9 @@ def _build_manifest(
             for file in files
         ],
     }
+    if splat_info is not None:
+        manifest["splat"] = splat_info
+    return manifest
 
 
 def _sha256_file(path: Path) -> str:
