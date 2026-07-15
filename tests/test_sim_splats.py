@@ -176,7 +176,7 @@ def test_upload_splat_presigns_creates_job_and_returns_artifacts(tmp_path) -> No
         return_value=httpx.Response(200, json={"jobId": "job_1", "status": "queued"})
     )
     respx.get(f"{BASE}/v1/jobs/job_1").mock(
-        return_value=httpx.Response(200, json={"jobId": "job_1", "status": "succeeded"})
+        return_value=httpx.Response(200, json={"jobId": "job_1", "status": "completed"})
     )
     respx.get(f"{BASE}/v1/jobs/job_1/artifacts").mock(
         return_value=httpx.Response(
@@ -206,6 +206,7 @@ def test_upload_splat_presigns_creates_job_and_returns_artifacts(tmp_path) -> No
     job_body = json.loads(jobs_route.calls.last.request.content)
     assert job_body["inputKind"] == "splat"
     assert job_body["costGuardrails"]["maxRuntimeMinutes"] == 30
+    assert finished["status"] == "completed"
     assert artifacts["downloadUrls"]["usdz"].startswith("https://s3.test/export.usdz")
 
 
@@ -215,6 +216,75 @@ def test_upload_splat_rejects_non_splat_file(tmp_path) -> None:
     with SimulationClient() as client:
         with pytest.raises(SimulationError, match="not a recognized Gaussian splat"):
             client.upload_splat(mesh)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda raw: raw.replace(b"property float f_dc_1\n", b""),
+            "missing required 3DGS properties",
+        ),
+        (
+            lambda raw: raw.replace(b"property float opacity", b"property double opacity"),
+            "scalar float or float32",
+        ),
+        (
+            lambda raw: raw.replace(b"property float f_rest_0", b"property float f_rest_10"),
+            "f_rest properties must be contiguous",
+        ),
+    ],
+)
+def test_upload_splat_strict_header_preflight_stops_before_presign(
+    mutation, message: str, tmp_path: Path
+) -> None:
+    splat = _write_gaussian_ply(tmp_path / "invalid.ply")
+    splat.write_bytes(mutation(splat.read_bytes()))
+
+    with respx.mock:
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match=message):
+                client.upload_splat(splat)
+
+    assert len(respx.calls) == 0
+
+
+def test_upload_splat_resource_limits_stop_before_presign(tmp_path: Path) -> None:
+    too_many = _write_gaussian_ply(tmp_path / "too-many.ply")
+    too_many.write_bytes(
+        too_many.read_bytes().replace(b"element vertex 3", b"element vertex 1000001")
+    )
+    too_large = _write_gaussian_ply(tmp_path / "too-large.ply")
+    with too_large.open("r+b") as stream:
+        stream.truncate(256 * 1024 * 1024 + 1)
+
+    with respx.mock:
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="1,000,000 Gaussians"):
+                client.upload_splat(too_many)
+            with pytest.raises(SimulationError, match="256 MiB"):
+                client.upload_splat(too_large)
+
+    assert len(respx.calls) == 0
+
+
+def test_upload_splat_rejects_excess_vertex_properties_before_presign(
+    tmp_path: Path,
+) -> None:
+    splat = _write_gaussian_ply(tmp_path / "too-many-properties.ply")
+    extras = b"".join(f"property float extra_{index}\n".encode("ascii") for index in range(63))
+    splat.write_bytes(
+        splat.read_bytes().replace(
+            b"property float opacity\n", extras + b"property float opacity\n"
+        )
+    )
+
+    with respx.mock:
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="62 vertex properties"):
+                client.upload_splat(splat)
+
+    assert len(respx.calls) == 0
 
 
 def test_wait_for_job_raises_on_failed_job() -> None:
@@ -227,6 +297,28 @@ def test_wait_for_job_raises_on_failed_job() -> None:
         with SimulationClient() as client:
             with pytest.raises(SimulationError, match="boom"):
                 client.wait_for_job("job_9", timeout_seconds=1, poll_interval_seconds=0.01)
+
+
+@pytest.mark.parametrize("status", ["canceled", "cancelled"])
+def test_wait_for_job_recognizes_cancellation_spellings(status: str) -> None:
+    with respx.mock:
+        respx.get(f"{BASE}/v1/jobs/job_canceled").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "jobId": "job_canceled",
+                    "status": status,
+                    "errorMessage": "operator canceled",
+                },
+            )
+        )
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="operator canceled"):
+                client.wait_for_job(
+                    "job_canceled",
+                    timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                )
 
 
 def test_top_level_help_lists_splat() -> None:
@@ -267,28 +359,25 @@ def test_cli_splat_upload_no_convert_json(tmp_path) -> None:
     assert "job_id" not in payload
 
 
-def test_cli_splat_upload_refuses_convert_for_non_ply(tmp_path) -> None:
+def test_upload_splat_rejects_non_ply_before_presign(tmp_path) -> None:
     spz = tmp_path / "scene.spz"
     spz.write_bytes(b"\x1f\x8b\x00\x00")
 
     with respx.mock:
-        respx.post(f"{BASE}/v1/uploads/presign").mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "uploadId": "upload_3",
-                    "inputPrefix": "s3://bucket/inputs/upload_3/",
-                    "presignedUrls": [
-                        {
-                            "url": "https://s3.test/post",
-                            "fields": {"key": "inputs/upload_3/scene.spz"},
-                        }
-                    ],
-                },
-            )
-        )
-        respx.post("https://s3.test/post").mock(return_value=httpx.Response(204))
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="only standard 3DGS \\.ply"):
+                client.upload_splat(spz)
+
+    assert len(respx.calls) == 0
+
+
+def test_cli_splat_upload_refuses_non_ply_before_presign(tmp_path) -> None:
+    spz = tmp_path / "scene.spz"
+    spz.write_bytes(b"\x1f\x8b\x00\x00")
+
+    with respx.mock:
         result = CliRunner().invoke(main_cli, ["splat", "upload", str(spz)])
 
     assert result.exit_code != 0
-    assert ".ply splats only" in str(result.exception)
+    assert "only standard 3DGS .ply" in str(result.exception)
+    assert len(respx.calls) == 0

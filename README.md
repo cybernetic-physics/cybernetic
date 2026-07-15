@@ -184,14 +184,14 @@ publish a durable public artifact.
 
 ### Gaussian splats
 
-Gaussian splats are first-class uploads. `.spz`/`.splat`/`.ksplat` are detected
-by extension; `.ply` is header-sniffed for the 3DGS vertex properties so a
-photogrammetry mesh PLY is not misclassified. Hosted Isaac sessions render
-NuRec USDZ — raw splat files stay `needs_conversion` until converted by the
-platform's export-only pipeline (3DGRUT `ply_to_usd`; no COLMAP, no training):
+Gaussian splats are first-class local assets. `.spz`/`.splat`/`.ksplat` are
+detected for inspection and packaging; `.ply` is header-sniffed for the 3DGS
+vertex properties so a photogrammetry mesh PLY is not misclassified. The hosted
+conversion endpoint currently accepts only standard 3DGS `.ply` and emits a
+validated OpenUSD `ParticleField3DGaussianSplat` USDZ (no COLMAP or training):
 
 ```bash
-# upload + convert to NuRec USDZ + wait for the artifact
+# upload + convert to ParticleField USDZ + wait for the artifact
 cybernetics splat upload ./construction_site.ply --convert --wait
 
 # inspect/import also understand splats (uploads a needs_conversion bundle)
@@ -203,8 +203,11 @@ cybernetics sim launch ./construction_site.usdz --wait
 ```
 
 `cybernetics splat upload --wait` prints a presigned `usdz_download_url` when
-the conversion job succeeds; `cybernetics splat status <job_id>` polls an
-existing job. Conversion currently accepts `.ply` splats only.
+the conversion job completes; `cybernetics splat status <job_id>` polls an
+existing job. The upload command rejects other splat containers locally, before
+presigning or starting paid compute. Hosted PLY conversion is bounded to 256 MiB,
+1,000,000 Gaussians, 62 scalar float properties, and a 64 KiB header; the SDK
+validates the full standard 3DGS property/SH contract locally before upload.
 
 Uploaded bundle manifests intentionally avoid host-local absolute source paths.
 They keep safe provenance only: source basename, optional user-supplied

@@ -63,7 +63,7 @@ def _with_guardrail_options(command):
 
 @click.group()
 def cli() -> None:
-    """Upload Gaussian splats and convert them to NuRec USDZ."""
+    """Upload standard 3DGS PLY splats and convert them to ParticleField USDZ."""
 
 
 @cli.command("upload")
@@ -72,7 +72,7 @@ def cli() -> None:
     "--convert/--no-convert",
     default=True,
     show_default=True,
-    help="Create a splat→NuRec-USDZ conversion job after uploading.",
+    help="Create a splat→ParticleField-USDZ conversion job after uploading.",
 )
 @click.option("--wait", is_flag=True, help="Wait for the conversion job and print artifacts.")
 @click.option("--timeout-seconds", default=1800.0, show_default=True, type=float)
@@ -92,17 +92,12 @@ def upload_command(
     api_key: str | None,
     base_url: str | None,
 ) -> None:
-    """Upload a local Gaussian splat (.ply/.spz/.splat/.ksplat)."""
+    """Upload a standard 3DGS Gaussian splat (.ply)."""
     client = _client(api_key=api_key, base_url=base_url)
     try:
         try:
             uploaded = client.upload_splat(path)
             payload: dict[str, Any] = dict(uploaded)
-            if convert and uploaded["format"] != "ply":
-                raise CyberneticsCliError(
-                    f"conversion currently supports .ply splats only, got .{uploaded['format']}",
-                    "Re-run with --no-convert to upload without a conversion job.",
-                )
             if convert:
                 job = client.create_splat_convert_job(
                     uploaded["inputPrefix"],
@@ -187,7 +182,7 @@ def status_command(
                 "job_status": job.get("status"),
                 "error_message": job.get("errorMessage"),
             }
-            if str(job.get("status", "")).lower() == "succeeded":
+            if str(job.get("status", "")).lower() in {"completed", "succeeded"}:
                 payload.update(_artifact_fields(client, job_id))
         except SimulationError as exc:
             raise CyberneticsCliError(str(exc)) from exc
