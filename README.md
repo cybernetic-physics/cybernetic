@@ -199,7 +199,7 @@ execution belongs behind backend adapters, not in the package import path.
 
 ## PI0 DROID inference
 
-`pi0-droid` is an inference-only hosted policy. It accepts one typed raw DROID
+`pi0-droid` is a frozen hosted policy. It accepts one typed raw DROID
 observation and returns one action chunk with shape `[H, 8]`: seven absolute
 joint-position targets followed by one gripper target. Authenticate with
 `cybernetics auth login` or `CYBERNETICS_API_KEY`, then sample it through the
@@ -224,8 +224,20 @@ result = sampler.sample_droid(observation).result(timeout=900)
 actions = result.action_chunk.to_numpy()
 ```
 
-This endpoint produces exactly one native-policy sample per call. It does not
-support SDE trajectories, predicted video, LoRA/full training,
+An external DSRL controller can steer the frozen policy by supplying one
+finite `float32[32]` action. The SDK repeats it across PI0's ten-step initial
+flow-noise horizon, snapshots the exact little-endian wire hash before
+submission, and rejects the response unless the runtime acknowledges that same
+`float32[10,32]` tensor:
+
+```python
+dsrl_action = types.Pi0DroidDsrlAction.from_numpy(controller_action)
+result = sampler.sample_droid(observation, dsrl_action=dsrl_action).result(timeout=900)
+```
+
+The DSRL optimizer and replay buffer remain client-side; the hosted PI0 weights
+stay immutable. This endpoint produces exactly one native-policy sample per
+call. It does not support SDE trajectories, predicted video, LoRA/full training,
 `forward_backward`, or `optim_step`. Do not confuse `pi0-droid` with the
 separate trainable `pi0.5` backend. A complete NPZ-to-action-file program is in
 [`examples/pi0_droid_sampling.py`](examples/pi0_droid_sampling.py).

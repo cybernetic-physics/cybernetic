@@ -104,3 +104,27 @@ class GetServerCapabilitiesResponse(BaseModel):
 
     dreamzero_rl_unavailable_reason: Optional[str] = None
     """Actionable reason DreamZero RL losses are unavailable, when known."""
+
+    pi0_initial_flow_noise_contract: Optional[str] = None
+    """PI0 raw flow-noise wire contract, when the active runtime supports it."""
+
+    pi0_initial_flow_noise_contract_version: Optional[int] = None
+    """Version of the PI0 raw flow-noise wire contract."""
+
+    pi0_initial_flow_noise_shape: Optional[List[int]] = None
+    """Exact raw PI0 initial flow-noise tensor shape."""
+
+    pi0_initial_flow_noise_dtype: Optional[str] = None
+    """Exact raw PI0 initial flow-noise tensor dtype."""
+
+    pi0_dsrl_action_shape: Optional[List[int]] = None
+    """Controller-facing PI0 DSRL SAC action shape."""
+
+    pi0_dsrl_action_dtype: Optional[str] = None
+    """Controller-facing PI0 DSRL SAC action dtype."""
+
+    pi0_dsrl_expansion: Optional[str] = None
+    """How the DSRL action expands into PI0's raw flow-noise tensor."""
+
+    base_policy_frozen: Optional[bool] = None
+    """Whether the active continuous-policy runtime keeps base weights immutable."""

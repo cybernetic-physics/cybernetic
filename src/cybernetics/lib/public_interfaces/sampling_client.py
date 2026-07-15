@@ -19,6 +19,10 @@ from cybernetics.lib.public_interfaces.api_future import APIFuture, AwaitableCon
 from cybernetics.lib.sidecar import SidecarHandle, SidecarRPC, create_sidecar_handle
 from cybernetics.lib.telemetry import Telemetry, capture_exceptions
 from cybernetics.lib.telemetry_provider import TelemetryProvider
+from cybernetics.types.pi0_droid_dsrl_action import (
+    pi0_initial_flow_noise_sha256,
+    require_pi0_initial_flow_noise_ack,
+)
 
 from ..api_future_impl import QueueState, QueueStateObserver, _APIFuture
 from ..retry_handler import RetryConfig, RetryHandler
@@ -33,6 +37,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 U = TypeVar("U")
+
+
+def _require_pi0_dsrl_ack(
+    source: ConcurrentFuture[types.SampleResponse],
+    *,
+    expected_sha256: str,
+) -> ConcurrentFuture[types.SampleResponse]:
+    """Return a dependent future that proves PI0 applied the requested noise."""
+    verified: ConcurrentFuture[types.SampleResponse] = ConcurrentFuture()
+
+    def _cancel_source_if_needed(completed: ConcurrentFuture[types.SampleResponse]) -> None:
+        if completed.cancelled():
+            source.cancel()
+
+    def _verify(completed: ConcurrentFuture[types.SampleResponse]) -> None:
+        if completed.cancelled():
+            verified.cancel()
+            return
+        if not verified.set_running_or_notify_cancel():
+            return
+        try:
+            response = completed.result()
+            policy_metadata = response.policy_metadata or {}
+            require_pi0_initial_flow_noise_ack(
+                policy_metadata,
+                expected_sha256=expected_sha256,
+            )
+        except BaseException as exc:
+            verified.set_exception(exc)
+        else:
+            verified.set_result(response)
+
+    verified.add_done_callback(_cancel_source_if_needed)
+    source.add_done_callback(_verify)
+    return verified
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +101,7 @@ class _SampleRPC(SidecarRPC):
     prompt: types.ModelInput
     conditioning: types.PolicyConditioning | None
     droid_observation: types.DroidObservation | None
+    pi0_initial_flow_noise: types.TensorData | None
     num_samples: int
     sampling_params: types.SamplingParams
     include_prompt_logprobs: bool
@@ -74,6 +114,7 @@ class _SampleRPC(SidecarRPC):
             prompt=self.prompt,
             conditioning=self.conditioning,
             droid_observation=self.droid_observation,
+            pi0_initial_flow_noise=self.pi0_initial_flow_noise,
             num_samples=self.num_samples,
             sampling_params=self.sampling_params,
             include_prompt_logprobs=self.include_prompt_logprobs,
@@ -260,6 +301,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         *,
         request_id: int,
         droid_observation: types.DroidObservation | None = None,
+        pi0_initial_flow_noise: types.TensorData | None = None,
         policy_mode: Literal["native", "sde"] | None = None,
         include_predicted_video: bool = False,
         request_kind: Literal["sample", "compute_logprobs"] = "sample",
@@ -272,6 +314,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 "prompt": prompt,
                 "conditioning": conditioning,
                 "droid_observation": droid_observation,
+                "pi0_initial_flow_noise": pi0_initial_flow_noise,
                 "sampling_params": sampling_params,
                 "prompt_logprobs": include_prompt_logprobs,
                 "topk_prompt_logprobs": topk_prompt_logprobs,
@@ -312,6 +355,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         *,
         request_id: int,
         droid_observation: types.DroidObservation | None = None,
+        pi0_initial_flow_noise: types.TensorData | None = None,
         policy_mode: Literal["native", "sde"] | None = None,
         include_predicted_video: bool = False,
         request_kind: Literal["sample", "compute_logprobs"] = "sample",
@@ -328,6 +372,8 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                     droid_observation.gripper_position,
                 )
             )
+        if pi0_initial_flow_noise is not None:
+            estimated_bytes_count += len(pi0_initial_flow_noise.data) * 4
         async with self.holder.sample_request_rate_limit(
             estimated_bytes_count, request_kind=request_kind
         ):
@@ -349,6 +395,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                     topk_prompt_logprobs,
                     request_id=request_id,
                     droid_observation=droid_observation,
+                    pi0_initial_flow_noise=pi0_initial_flow_noise,
                     policy_mode=policy_mode,
                     include_predicted_video=include_predicted_video,
                     request_kind=request_kind,
@@ -395,6 +442,8 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         droid_observation: types.DroidObservation | None = None,
         policy_mode: Literal["native", "sde"] | None = None,
         include_predicted_video: bool = False,
+        *,
+        pi0_initial_flow_noise: types.TensorData | None = None,
     ) -> ConcurrentFuture[types.SampleResponse]:
         """Generate token completions or continuous-policy rollout artifacts.
 
@@ -404,6 +453,9 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
           RGB/state/mask/embodiment inputs.
         - `droid_observation`: Raw three-camera DROID observation. The hosted
           policy owns its transforms and returns robot-space actions.
+        - `pi0_initial_flow_noise`: Advanced PI0-only `[10, 32]` float32
+          initial flow noise. DSRL callers should prefer `sample_droid` with a
+          typed `[32]` `dsrl_action`.
         - `policy_mode`: `native` for causal joint action/video serving or `sde`
           for a recorded RL trajectory.
         - `include_predicted_video`: Return one bounded video latent from the
@@ -428,6 +480,11 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         """
         if conditioning is not None and droid_observation is not None:
             raise ValueError("conditioning and droid_observation are mutually exclusive")
+        if pi0_initial_flow_noise is not None and self._base_model not in (
+            None,
+            "pi0-droid",
+        ):
+            raise ValueError("pi0_initial_flow_noise is supported only by pi0-droid")
 
         if self._sampling_client_sidecar_handle is not None:
             return self._sampling_client_sidecar_handle.submit_rpc(
@@ -435,6 +492,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                     prompt=prompt,
                     conditioning=conditioning,
                     droid_observation=droid_observation,
+                    pi0_initial_flow_noise=pi0_initial_flow_noise,
                     num_samples=num_samples,
                     sampling_params=sampling_params,
                     include_prompt_logprobs=include_prompt_logprobs,
@@ -457,6 +515,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 topk_prompt_logprobs,
                 request_id=request_id,
                 droid_observation=droid_observation,
+                pi0_initial_flow_noise=pi0_initial_flow_noise,
                 policy_mode=policy_mode,
                 include_predicted_video=include_predicted_video,
             )
@@ -479,6 +538,8 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         droid_observation: types.DroidObservation | None = None,
         policy_mode: Literal["native", "sde"] | None = None,
         include_predicted_video: bool = False,
+        *,
+        pi0_initial_flow_noise: types.TensorData | None = None,
     ) -> types.SampleResponse:
         """Async version of sample."""
         return await AwaitableConcurrentFuture(
@@ -490,6 +551,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 topk_prompt_logprobs=topk_prompt_logprobs,
                 conditioning=conditioning,
                 droid_observation=droid_observation,
+                pi0_initial_flow_noise=pi0_initial_flow_noise,
                 policy_mode=policy_mode,
                 include_predicted_video=include_predicted_video,
             )
@@ -502,6 +564,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         policy_mode: Literal["native", "sde"] = "native",
         include_predicted_video: bool = False,
         seed: int | None = None,
+        dsrl_action: types.Pi0DroidDsrlAction | None = None,
     ) -> ConcurrentFuture[types.SampleResponse]:
         """Sample a hosted DROID policy from a raw robot observation.
 
@@ -510,20 +573,40 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         ``pi0-droid`` supports native inference only; ``dreamzero-droid`` also
         supports SDE mode and predicted video.
         """
-        if getattr(self, "_base_model", None) == "pi0-droid":
+        base_model = getattr(self, "_base_model", None)
+        if base_model == "pi0-droid" or dsrl_action is not None:
             if policy_mode != "native":
                 raise ValueError("pi0-droid supports only policy_mode='native'")
             if include_predicted_video:
                 raise ValueError("pi0-droid does not produce predicted video")
             if seed is not None:
                 raise ValueError("pi0-droid does not support deterministic seed")
-        return self.sample(
+        if dsrl_action is not None and base_model not in (
+            None,
+            "pi0-droid",
+        ):
+            raise ValueError("dsrl_action is supported only by pi0-droid")
+        pi0_initial_flow_noise = (
+            dsrl_action.to_pi0_initial_flow_noise() if dsrl_action is not None else None
+        )
+        expected_noise_sha256 = None
+        if pi0_initial_flow_noise is not None:
+            expected_noise_sha256 = pi0_initial_flow_noise_sha256(pi0_initial_flow_noise)
+        response_future = self.sample(
             prompt=types.ModelInput.empty(),
             droid_observation=observation,
+            pi0_initial_flow_noise=pi0_initial_flow_noise,
             num_samples=1,
             sampling_params=types.SamplingParams(max_tokens=1, seed=seed),
             policy_mode=policy_mode,
             include_predicted_video=include_predicted_video,
+        )
+        if dsrl_action is None:
+            return response_future
+        assert expected_noise_sha256 is not None
+        return _require_pi0_dsrl_ack(
+            response_future,
+            expected_sha256=expected_noise_sha256,
         )
 
     async def sample_droid_async(
@@ -533,6 +616,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
         policy_mode: Literal["native", "sde"] = "native",
         include_predicted_video: bool = False,
         seed: int | None = None,
+        dsrl_action: types.Pi0DroidDsrlAction | None = None,
     ) -> types.SampleResponse:
         """Async version of :meth:`sample_droid`."""
         return await AwaitableConcurrentFuture(
@@ -541,6 +625,7 @@ class SamplingClient(TelemetryProvider, QueueStateObserver):
                 policy_mode=policy_mode,
                 include_predicted_video=include_predicted_video,
                 seed=seed,
+                dsrl_action=dsrl_action,
             )
         )
 

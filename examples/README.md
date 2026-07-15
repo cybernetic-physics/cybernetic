@@ -8,11 +8,13 @@ models on the hosted Worldlines / Cybernetics control plane through the
 forward_backward([datum], loss_fn)  ->  optim_step(adam)  ->  save_state(name)
 ```
 
-PI0 DROID serving is deliberately outside that training contract. The
-inference-only `pi0-droid` model accepts a typed `DroidObservation` and returns
-one `[H, 8]` chunk of absolute DROID joint-position/gripper targets. It does not
-support SDE, predicted video, LoRA/full training, `forward_backward`, or
-`optim_step`.
+PI0 DROID serving is deliberately outside that training contract. The frozen
+`pi0-droid` model accepts a typed `DroidObservation` and returns one `[H, 8]`
+chunk of absolute DROID joint-position/gripper targets. An external DSRL
+controller may supply a typed `float32[32]` action that the SDK expands and
+verifies as PI0's initial flow noise; the base weights remain immutable. The
+endpoint does not support SDE, predicted video, LoRA/full training,
+`forward_backward`, or `optim_step`.
 
 The CLIENT builds a per-model `collate` dict locally (tokenization, image stacks,
 normalized actions), encodes it into ONE `Datum` per sample with that model's
