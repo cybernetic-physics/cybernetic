@@ -59,15 +59,25 @@ class SessionMCPClient:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if not isinstance(exc, BaseException):
+                raise
+            exc.add_note(
+                "SessionMCPClient cleanup failed after the primary error: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
 
     def close(self) -> None:
         """Revoke the scoped key without changing the hosted session lifecycle."""
         if self._closed:
             return
-        self._revoke_key(self._key_id)
-        self._closed = True
-        self._scoped_key = ""
+        try:
+            self._revoke_key(self._key_id)
+        finally:
+            self._closed = True
+            self._scoped_key = ""
 
     def call_tool(
         self,

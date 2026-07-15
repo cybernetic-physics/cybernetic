@@ -266,7 +266,15 @@ class SimulationClient:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if not isinstance(exc, BaseException):
+                raise
+            exc.add_note(
+                "SimulationClient cleanup failed after the primary error: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
 
     def import_asset(
         self,
