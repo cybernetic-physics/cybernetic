@@ -21,6 +21,9 @@ _TERMINAL_STATUSES = {"failed", "terminated", "stopped", "error", "snapshot_fail
 _JOB_SUCCESS_STATUSES = {"succeeded"}
 _JOB_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 _SPLAT_UPLOAD_CONTENT_TYPE = "application/octet-stream"
+_STOP_ACCEPTED_STATUSES = (_TERMINAL_STATUSES - {"snapshot_failed"}) | {"stopping"}
+_SESSION_TRANSIENT_STATUS_CODES = {502, 503, 504}
+_SESSION_TRANSIENT_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 8.0, 10.0)
 AssetRefKind = Literal["environment_version", "local_bundle", "catalog_asset"]
 
 
@@ -510,10 +513,19 @@ class SimulationClient:
         timeout_seconds: float = 900.0,
         poll_interval_seconds: float = 5.0,
     ) -> dict[str, Any]:
+        """Wait for preview readiness, retrying only bounded transient gateway failures."""
         deadline = time.monotonic() + timeout_seconds
         last = "not checked"
         while True:
-            session = self._request("GET", f"/v1/sessions/{session_id}")
+            path = f"/v1/sessions/{session_id}"
+            operation = f"GET {path}"
+            response = self._request_session_response(
+                "GET",
+                path,
+                operation=operation,
+                deadline=deadline,
+            )
+            session = _response_json_object(response, operation)
             status = str(session.get("status", "")).lower()
             if status in _TERMINAL_STATUSES:
                 raise SimulationError(f"session {session_id} entered terminal status {status!r}")
@@ -555,7 +567,28 @@ class SimulationClient:
         return path
 
     def stop_session(self, session_id: str) -> None:
-        self._request("POST", f"/v1/sessions/{session_id}/stop", json_body={})
+        """Request session cleanup with bounded retries and verified idempotency."""
+        path = f"/v1/sessions/{session_id}/stop"
+        operation = f"POST {path}"
+        response = self._request_session_response(
+            "POST",
+            path,
+            operation=operation,
+            json_body={},
+        )
+        if response.status_code == 409:
+            verify_path = f"/v1/sessions/{session_id}"
+            verify_operation = f"GET {verify_path} after stop conflict"
+            verify_response = self._request_session_response(
+                "GET",
+                verify_path,
+                operation=verify_operation,
+            )
+            session = _response_json_object(verify_response, verify_operation)
+            status = str(session.get("status", "")).lower()
+            if status in _STOP_ACCEPTED_STATUSES:
+                return
+        _raise_for_response(response, operation)
 
     def upload_splat(self, path: str | Path) -> dict[str, Any]:
         """Upload a local Gaussian splat file as a reconstruction input.
@@ -793,19 +826,72 @@ class SimulationClient:
         *,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = self._client.request(
+        operation = f"{method} {path}"
+        response = self._request_response(method, path, json_body=json_body)
+        return _response_json_object(response, operation)
+
+    def _request_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
+        return self._client.request(
             method,
             path,
             json=json_body,
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
-        _raise_for_response(response, f"{method} {path}")
-        if response.status_code == 204 or not response.content:
-            return {}
-        body = response.json()
-        if not isinstance(body, dict):
-            raise SimulationError(f"{method} {path} returned a non-object JSON response")
-        return body
+
+    def _request_session_response(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: str,
+        json_body: dict[str, Any] | None = None,
+        deadline: float | None = None,
+    ) -> Any:
+        """Run one session request with a small, explicit transient retry budget."""
+        last_response: Any = None
+        for attempt in range(1, len(_SESSION_TRANSIENT_BACKOFF_SECONDS) + 2):
+            if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
+                _raise_transient_session_error(
+                    last_response,
+                    operation,
+                    attempts=attempt - 1,
+                    reason="retry deadline expired",
+                )
+
+            response = self._request_response(method, path, json_body=json_body)
+            status_code = getattr(response, "status_code", 0)
+            if status_code not in _SESSION_TRANSIENT_STATUS_CODES:
+                return response
+            last_response = response
+
+            if attempt > len(_SESSION_TRANSIENT_BACKOFF_SECONDS):
+                _raise_transient_session_error(
+                    response,
+                    operation,
+                    attempts=attempt,
+                    reason="retry budget exhausted",
+                )
+
+            delay = _SESSION_TRANSIENT_BACKOFF_SECONDS[attempt - 1]
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _raise_transient_session_error(
+                        response,
+                        operation,
+                        attempts=attempt,
+                        reason="retry deadline expired",
+                    )
+                delay = min(delay, remaining)
+            time.sleep(delay)
+
+        raise AssertionError("session retry loop exhausted without returning")
 
     def _upload_bundle(self, upload: dict[str, Any], bundle_path: Path) -> None:
         self._upload_presigned_file(
@@ -941,6 +1027,31 @@ def _raise_for_response(response: Any, operation: str) -> None:
         return
     text = getattr(response, "text", "")
     raise SimulationError(f"{operation} failed with HTTP {status_code}: {text[:300]}")
+
+
+def _response_json_object(response: Any, operation: str) -> dict[str, Any]:
+    _raise_for_response(response, operation)
+    if response.status_code == 204 or not response.content:
+        return {}
+    body = response.json()
+    if not isinstance(body, dict):
+        raise SimulationError(f"{operation} returned a non-object JSON response")
+    return body
+
+
+def _raise_transient_session_error(
+    response: Any,
+    operation: str,
+    *,
+    attempts: int,
+    reason: str,
+) -> None:
+    status_code = getattr(response, "status_code", 0)
+    text = str(getattr(response, "text", ""))
+    raise SimulationError(
+        f"{operation} failed with transient HTTP {status_code} after {attempts} attempts "
+        f"({reason}): {text[:300]}"
+    )
 
 
 def _default_environment_name(package: AssetPackage) -> str:
