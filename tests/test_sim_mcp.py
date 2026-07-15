@@ -222,18 +222,41 @@ def test_mcp_error_redacts_scoped_key() -> None:
     assert "[REDACTED]" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("error_factory", "failure_code"),
+    [
+        (
+            lambda request: httpx.ConnectError("connection failed", request=request),
+            "MCP_TRANSPORT_CONNECT",
+        ),
+        (
+            lambda request: httpx.ReadTimeout("request timed out", request=request),
+            "MCP_TRANSPORT_TIMEOUT",
+        ),
+        (
+            lambda request: httpx.RemoteProtocolError("protocol failed", request=request),
+            "MCP_TRANSPORT_ERROR",
+        ),
+    ],
+)
 @respx.mock
-def test_mcp_transport_error_hides_request_credentials() -> None:
+def test_mcp_transport_error_hides_request_credentials(
+    error_factory,
+    failure_code: str,
+) -> None:
     _mock_grant_and_revoke()
 
     def fail_with_request(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection failed", request=request)
+        raise error_factory(request)
 
     respx.post(f"{BASE}/mcp").mock(side_effect=fail_with_request)
 
     with SimulationClient(api_key=ROOT_KEY, base_url=BASE) as client:
         with client.mcp_session(SESSION_ID) as mcp:
-            with pytest.raises(SimulationMCPError, match="transport request failed") as exc_info:
+            with pytest.raises(
+                SimulationMCPError,
+                match=rf"transport request failed \[{failure_code}\]",
+            ) as exc_info:
                 mcp.call_tool("isaac.get_scene_info")
 
     assert exc_info.value.__cause__ is None

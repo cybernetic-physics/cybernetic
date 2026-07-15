@@ -112,6 +112,7 @@ class SessionMCPClient:
             headers["Mcp-Session-Id"] = self._mcp_session_id
 
         response = self._send(
+            name,
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -120,8 +121,6 @@ class SessionMCPClient:
             },
             headers,
         )
-        if response is None:
-            raise SimulationMCPError(f"MCP tool {name!r} transport request failed")
         status_code = getattr(response, "status_code", 0)
         if status_code >= 400:
             raise SimulationMCPError(f"MCP tool {name!r} failed with HTTP {status_code}")
@@ -133,7 +132,12 @@ class SessionMCPClient:
             raise SimulationMCPError(f"MCP tool {name!r} returned invalid JSON") from exc
         return self._parse_envelope(name, request_id, envelope)
 
-    def _send(self, payload: dict[str, Any], headers: dict[str, str]) -> Any | None:
+    def _send(
+        self,
+        tool_name: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+    ) -> Any:
         try:
             return self._client.request(
                 "POST",
@@ -141,8 +145,15 @@ class SessionMCPClient:
                 json=payload,
                 headers=headers,
             )
+        except httpx.TimeoutException:
+            failure_code = "MCP_TRANSPORT_TIMEOUT"
+        except httpx.ConnectError:
+            failure_code = "MCP_TRANSPORT_CONNECT"
         except httpx.HTTPError:
-            return None
+            failure_code = "MCP_TRANSPORT_ERROR"
+        raise SimulationMCPError(
+            f"MCP tool {tool_name!r} transport request failed [{failure_code}]"
+        ) from None
 
     def _preserve_mcp_session(self, response: Any) -> None:
         returned_id = response.headers.get("Mcp-Session-Id")
