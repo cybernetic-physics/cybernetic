@@ -11,6 +11,17 @@ export CYBERNETICS_API_KEY="cp_live_..."   # or run: cybernetics auth login
 cybernetics doctor                  # read-only API/auth/SFT/RL readiness check
 ```
 
+## Documentation
+
+Full documentation lives in [`docs/`](docs/src/SUMMARY.md) as an
+[mdBook](https://rust-lang.github.io/mdBook/): a [Quickstart](docs/src/quickstart.md),
+[concepts](docs/src/concepts/mental-model.md) (the mental model, SFT-vs-RL, a
+glossary), task [guides](docs/src/guides/authentication.md) (auth, training,
+sampling, checkpoints, [Behavior CI](docs/src/guides/behavior-ci.md)), and a
+complete [API / CLI / schema reference](docs/src/reference/client-api.md).
+
+Build it locally with `mdbook serve docs` (or `mdbook build docs`).
+
 Install directly from GitHub when you want the current repo version:
 
 ```bash

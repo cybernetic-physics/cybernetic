@@ -1,0 +1,18 @@
+[book]
+title = "Cybernetics SDK Documentation"
+description = "Official documentation for the Cybernetics Python SDK (cybernetic-physics): training, sampling, checkpoints, the CLI, and Behavior CI."
+authors = ["Cybernetic Physics"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/cybernetic-physics/cybernetic"
+edit-url-template = "https://github.com/cybernetic-physics/cybernetic/edit/main/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
