@@ -268,6 +268,41 @@ def test_upload_splat_resource_limits_stop_before_presign(tmp_path: Path) -> Non
     assert len(respx.calls) == 0
 
 
+@pytest.mark.parametrize("count_token", ["1_0", "1e3", "1.0"])
+def test_upload_splat_rejects_non_decimal_vertex_count_before_presign(
+    count_token: str, tmp_path: Path
+) -> None:
+    splat = _write_gaussian_ply(tmp_path / "invalid-count.ply")
+    splat.write_bytes(
+        splat.read_bytes().replace(
+            b"element vertex 3", f"element vertex {count_token}".encode("ascii")
+        )
+    )
+
+    with respx.mock:
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="ASCII decimal integer"):
+                client.upload_splat(splat)
+
+    assert len(respx.calls) == 0
+
+
+def test_upload_splat_rejects_duplicate_vertex_element_before_presign(
+    tmp_path: Path,
+) -> None:
+    splat = _write_gaussian_ply(tmp_path / "duplicate-vertex.ply")
+    splat.write_bytes(
+        splat.read_bytes().replace(b"element vertex 3", b"element vertex 3\nelement vertex 3")
+    )
+
+    with respx.mock:
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="exactly one vertex element"):
+                client.upload_splat(splat)
+
+    assert len(respx.calls) == 0
+
+
 def test_upload_splat_rejects_excess_vertex_properties_before_presign(
     tmp_path: Path,
 ) -> None:

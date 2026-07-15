@@ -129,10 +129,14 @@ def validate_hosted_splat_ply(path: Path) -> HostedSplatPly:
         elif parts[0] == "element":
             in_vertices = len(parts) == 3 and parts[1] == "vertex"
             if in_vertices:
-                try:
-                    gaussian_count = int(parts[2])
-                except ValueError as exc:
-                    raise AssetPackageError("splat PLY Gaussian count must be an integer") from exc
+                if gaussian_count is not None:
+                    raise AssetPackageError("splat PLY must declare exactly one vertex element")
+                count_token = parts[2]
+                if not count_token.isascii() or not count_token.isdigit():
+                    raise AssetPackageError(
+                        "splat PLY Gaussian count must be an ASCII decimal integer"
+                    )
+                gaussian_count = int(count_token)
         elif parts[0] == "property" and in_vertices:
             if (
                 len(parts) != 3
