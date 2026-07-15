@@ -249,13 +249,15 @@ class SimulationClient:
 
     def close(self) -> None:
         cleanup_error: Exception | None = None
+        revocation_pending: set[SessionMCPClient] = set()
         for mcp_client in tuple(self._mcp_clients):
             try:
                 mcp_client.close()
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
-        self._mcp_clients.clear()
-        if self._owns_client:
+                revocation_pending.add(mcp_client)
+        self._mcp_clients = revocation_pending
+        if self._owns_client and not revocation_pending:
             close = getattr(self._client, "close", None)
             if callable(close):
                 close()
@@ -266,7 +268,15 @@ class SimulationClient:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if not isinstance(exc, BaseException):
+                raise
+            exc.add_note(
+                "SimulationClient cleanup failed after the primary error: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
 
     def import_asset(
         self,

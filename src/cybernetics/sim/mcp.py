@@ -21,6 +21,7 @@ class SessionMCPClient:
         "_key_id",
         "_mcp_session_id",
         "_request_id",
+        "_revoked",
         "_revoke_key",
         "_scoped_key",
         "_session_id",
@@ -45,6 +46,7 @@ class SessionMCPClient:
         self._mcp_session_id: str | None = None
         self._request_id = 0
         self._closed = False
+        self._revoked = False
 
     @property
     def session_id(self) -> str:
@@ -59,15 +61,24 @@ class SessionMCPClient:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if not isinstance(exc, BaseException):
+                raise
+            exc.add_note(
+                "SessionMCPClient cleanup failed after the primary error: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
 
     def close(self) -> None:
         """Revoke the scoped key without changing the hosted session lifecycle."""
-        if self._closed:
+        if self._revoked:
             return
-        self._revoke_key(self._key_id)
         self._closed = True
         self._scoped_key = ""
+        self._revoke_key(self._key_id)
+        self._revoked = True
 
     def call_tool(
         self,

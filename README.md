@@ -105,8 +105,11 @@ with cybernetics.Client() as client:
 
 An authenticated SDK client can also control the hosted Isaac session through a
 private, session-scoped MCP grant. The grant is pinned to one session, permits
-only `isaac.*` tools, and is revoked when the MCP context closes. Closing the MCP
-context does not stop the Isaac session.
+only `isaac.*` tools, and is revoked when the MCP context closes. The local
+credential is erased and disabled before remote revocation; a failed revocation
+remains retryable through `SimulationClient.close()` until the control plane
+confirms it or the scoped grant expires. Closing the MCP context does not stop
+the Isaac session.
 
 ```python
 import cybernetics
