@@ -83,7 +83,11 @@ def import_command(
     api_key: str | None,
     base_url: str | None,
 ) -> None:
-    """Package and upload a local USD/USDZ asset as an environment version."""
+    """Package and upload a local USD/USDZ or Gaussian-splat asset as an environment version.
+
+    Gaussian splats upload as needs_conversion source bundles; convert them to
+    a renderable NuRec USDZ with `cybernetics splat upload --convert`.
+    """
     client = _client(api_key=api_key, base_url=base_url)
     try:
         try:
@@ -217,12 +221,13 @@ def _client(*, api_key: str | None, base_url: str | None) -> SimulationClient:
 
 
 def _print_import(result: SimImportResult, ctx: CLIContext | None) -> None:
+    if result.package and result.package.compatibility_status != "ready_to_render":
+        # Splat bundles upload before conversion; keep the real status visible.
+        status = result.package.compatibility_status
+    else:
+        status = "ready"
     payload = {
-        "status": (
-            result.package.compatibility_status
-            if result.package and result.environment_ref is None
-            else "ready"
-        ),
+        "status": status,
         "asset_ref": result.asset_ref,
         "environment_ref": result.environment_ref.uri if result.environment_ref else None,
         "env_id": result.env_id,

@@ -12,12 +12,15 @@ from cybernetics.lib.credentials import resolve_api_key, resolve_base_url
 
 from .errors import SimulationError
 from .mcp import SessionMCPClient
-from .packaging import AssetPackage, package_local_asset
+from .packaging import AssetPackage, detect_gaussian_splat_format, package_local_asset
 
 DEFAULT_BASE_URL = "https://api.cyberneticphysics.com"
 SIMULATION_ASSET_REF_SCHEMA_VERSION = "simulation-asset-ref/v1"
 _READY_STATUSES = {"running", "idle"}
 _TERMINAL_STATUSES = {"failed", "terminated", "stopped", "error", "snapshot_failed"}
+_JOB_SUCCESS_STATUSES = {"succeeded"}
+_JOB_TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+_SPLAT_UPLOAD_CONTENT_TYPE = "application/octet-stream"
 AssetRefKind = Literal["environment_version", "local_bundle", "catalog_asset"]
 
 
@@ -297,6 +300,13 @@ class SimulationClient:
         )
         if require_renderable and package.compatibility_status != "ready_to_render":
             package.cleanup()
+            if _is_gaussian_splat_kind(package.asset_kind):
+                raise SimulationError(
+                    f"{package.asset_kind} is {package.compatibility_status}; hosted Isaac "
+                    "sessions render NuRec USDZ, not raw splat files. Convert it first with "
+                    "`cybernetics splat upload <file> --convert --wait`, then launch the "
+                    "exported USDZ artifact."
+                )
             raise SimulationError(
                 f"{package.asset_kind} is {package.compatibility_status}; "
                 "the MVP can render USD/USDZ assets and package robot descriptions for later conversion."
@@ -304,7 +314,13 @@ class SimulationClient:
         if keep_bundle:
             package = _with_persistent_bundle(package)
 
-        if package.compatibility_status != "ready_to_render":
+        # Gaussian splats upload as environment versions even though they are
+        # needs_conversion: the bundle is the durable source artifact the
+        # platform converts to NuRec USDZ. Other non-renderable kinds keep the
+        # package-local behavior.
+        if package.compatibility_status != "ready_to_render" and not _is_gaussian_splat_kind(
+            package.asset_kind
+        ):
             if not keep_bundle and bundle_path is None:
                 package.cleanup()
             return SimImportResult(
@@ -326,14 +342,18 @@ class SimulationClient:
         )
         env_id = _require_str(environment, "id")
 
+        version_body: dict[str, Any] = {
+            "notes": notes or f"Imported from {Path(ref).name}",
+            "upload": {"type": "bundle_zip"},
+        }
+        # Splat bundles have no USD stage yet; omit the key instead of sending
+        # null (the control plane treats rootStageRelpath as optional-string).
+        if package.root_stage_relpath is not None:
+            version_body["rootStageRelpath"] = package.root_stage_relpath
         version_response = self._request(
             "POST",
             f"/v1/envs/{env_id}/versions",
-            json_body={
-                "notes": notes or f"Imported from {Path(ref).name}",
-                "rootStageRelpath": package.root_stage_relpath,
-                "upload": {"type": "bundle_zip"},
-            },
+            json_body=version_body,
         )
         version = _require_dict(version_response, "version")
         version_id = _require_str(version, "id")
@@ -342,14 +362,16 @@ class SimulationClient:
             raise SimulationError("control plane did not return a bundle upload target")
         self._upload_bundle(upload, package.bundle_path)
 
+        finalize_body: dict[str, Any] = {
+            "contentSha256": package.bundle_sha256,
+            "bundleSizeBytes": package.bundle_size_bytes,
+        }
+        if package.root_stage_relpath is not None:
+            finalize_body["rootStageRelpath"] = package.root_stage_relpath
         finalized = self._request(
             "POST",
             f"/v1/envs/{env_id}/versions/{version_id}/finalize",
-            json_body={
-                "contentSha256": package.bundle_sha256,
-                "bundleSizeBytes": package.bundle_size_bytes,
-                "rootStageRelpath": package.root_stage_relpath,
-            },
+            json_body=finalize_body,
         )
         if not keep_bundle and bundle_path is None:
             package.cleanup()
@@ -535,6 +557,136 @@ class SimulationClient:
     def stop_session(self, session_id: str) -> None:
         self._request("POST", f"/v1/sessions/{session_id}/stop", json_body={})
 
+    def upload_splat(self, path: str | Path) -> dict[str, Any]:
+        """Upload a local Gaussian splat file as a reconstruction input.
+
+        Presigns via ``POST /v1/uploads/presign`` (``inputKind: "splat"``),
+        uploads the file, and returns ``{"uploadId", "inputPrefix", "format"}``.
+        The returned ``inputPrefix`` feeds :meth:`create_splat_convert_job`.
+        """
+        source = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise SimulationError(f"splat path is not a file: {source}")
+        splat_format = detect_gaussian_splat_format(source)
+        if splat_format is None:
+            raise SimulationError(
+                f"{source.name} is not a recognized Gaussian splat (.ply with 3DGS "
+                "vertex properties, .spz, .splat, or .ksplat)"
+            )
+
+        presign = self._request(
+            "POST",
+            "/v1/uploads/presign",
+            json_body={
+                "files": [
+                    {
+                        "name": source.name,
+                        "contentType": _SPLAT_UPLOAD_CONTENT_TYPE,
+                        "size": source.stat().st_size,
+                    }
+                ],
+                "inputKind": "splat",
+            },
+        )
+        urls = presign.get("presignedUrls")
+        if not isinstance(urls, list) or not urls or not isinstance(urls[0], dict):
+            raise SimulationError("control plane did not return a presigned splat upload")
+        self._upload_presigned_file(urls[0], source, _SPLAT_UPLOAD_CONTENT_TYPE)
+
+        return {
+            "uploadId": _require_str(presign, "uploadId"),
+            "inputPrefix": _require_str(presign, "inputPrefix"),
+            "format": splat_format,
+            "name": source.name,
+        }
+
+    def create_splat_convert_job(
+        self,
+        input_uri: str,
+        *,
+        max_runtime_minutes: int = 30,
+        max_hourly_price: float = 2.0,
+        gpu_min_vram: int = 24,
+    ) -> dict[str, Any]:
+        """Create a splat→NuRec-USDZ conversion job for an uploaded splat.
+
+        The job runs the export-only path of the reconstruction pipeline
+        (3DGRUT ``ply_to_usd``); COLMAP and training are skipped.
+        """
+        return self._request(
+            "POST",
+            "/v1/jobs",
+            json_body={
+                "inputUri": input_uri,
+                "inputKind": "splat",
+                "config": {"exportUsdz": True},
+                "costGuardrails": {
+                    "maxRuntimeMinutes": max_runtime_minutes,
+                    "maxHourlyPrice": max_hourly_price,
+                    "gpuMinVram": gpu_min_vram,
+                },
+            },
+        )
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/v1/jobs/{job_id}")
+
+    def wait_for_job(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: float = 1800.0,
+        poll_interval_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            job = self.get_job(job_id)
+            status = str(job.get("status", "")).lower()
+            if status in _JOB_SUCCESS_STATUSES:
+                return job
+            if status in _JOB_TERMINAL_STATUSES:
+                error = job.get("errorMessage") or "no error message"
+                raise SimulationError(f"job {job_id} ended {status!r}: {error}")
+            if time.monotonic() >= deadline:
+                raise SimulationError(
+                    f"job {job_id} still {status or 'unknown'!r} after {timeout_seconds}s"
+                )
+            time.sleep(poll_interval_seconds)
+
+    def job_artifacts(self, job_id: str) -> dict[str, Any]:
+        """Return ``{"artifacts": {...}, "downloadUrls": {...}}`` for a job."""
+        return self._request("GET", f"/v1/jobs/{job_id}/artifacts")
+
+    def _upload_presigned_file(
+        self,
+        upload: dict[str, Any],
+        source: Path,
+        content_type: str,
+        *,
+        upload_name: str | None = None,
+    ) -> None:
+        url = upload.get("url") or upload.get("putUrl")
+        if not isinstance(url, str) or not url:
+            raise SimulationError("presigned upload response did not include an upload URL")
+        fields = upload.get("fields")
+        if isinstance(fields, dict):
+            with source.open("rb") as handle:
+                response = self._client.post(
+                    url,
+                    data={str(k): str(v) for k, v in fields.items()},
+                    files={"file": (upload_name or source.name, handle, content_type)},
+                )
+            _raise_for_response(response, f"POST {url}")
+            return
+        # Future-compatible fallback if the API switches to a real signed PUT.
+        with source.open("rb") as handle:
+            response = self._client.put(
+                url,
+                content=handle.read(),
+                headers={"content-type": content_type},
+            )
+        _raise_for_response(response, f"PUT {url}")
+
     def mcp_session(
         self,
         session_id: str,
@@ -656,29 +808,9 @@ class SimulationClient:
         return body
 
     def _upload_bundle(self, upload: dict[str, Any], bundle_path: Path) -> None:
-        url = upload.get("url") or upload.get("putUrl")
-        if not isinstance(url, str) or not url:
-            raise SimulationError("control plane upload response did not include an upload URL")
-
-        fields = upload.get("fields")
-        if isinstance(fields, dict):
-            with bundle_path.open("rb") as handle:
-                response = self._client.post(
-                    url,
-                    data={str(k): str(v) for k, v in fields.items()},
-                    files={"file": ("bundle.zip", handle, "application/zip")},
-                )
-            _raise_for_response(response, f"POST {url}")
-            return
-
-        # Future-compatible fallback if the API switches to a real signed PUT.
-        with bundle_path.open("rb") as handle:
-            response = self._client.put(
-                url,
-                content=handle.read(),
-                headers={"content-type": "application/zip"},
-            )
-        _raise_for_response(response, f"PUT {url}")
+        self._upload_presigned_file(
+            upload, bundle_path, "application/zip", upload_name="bundle.zip"
+        )
 
     def _site_base_url(self) -> str:
         parsed = urlparse(self.base_url)
@@ -702,6 +834,10 @@ def parse_environment_ref(value: str) -> EnvironmentRef | None:
     raise SimulationError(
         "environment refs must look like cybernetics://envs/<env_id>/versions/<version_id>"
     )
+
+
+def _is_gaussian_splat_kind(asset_kind: str) -> bool:
+    return asset_kind.startswith("gaussian_splat_")
 
 
 def _reject_remote_ref(value: str) -> None:

@@ -15,6 +15,7 @@ from .mcp import SessionMCPClient
 from .packaging import (
     AssetPackage,
     AssetPackageError,
+    detect_gaussian_splat_format,
     inspect_local_asset,
     package_local_asset,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "SimulationMCPError",
     "SessionMCPClient",
     "SIMULATION_ASSET_REF_SCHEMA_VERSION",
+    "detect_gaussian_splat_format",
     "inspect_local_asset",
     "package_local_asset",
     "parse_environment_ref",
