@@ -303,6 +303,22 @@ def test_upload_splat_rejects_duplicate_vertex_element_before_presign(
     assert len(respx.calls) == 0
 
 
+def test_upload_splat_rejects_oversized_vertex_count_before_presign(
+    tmp_path: Path,
+) -> None:
+    splat = _write_gaussian_ply(tmp_path / "oversized-count.ply")
+    splat.write_bytes(
+        splat.read_bytes().replace(b"element vertex 3", b"element vertex " + b"9" * 5000)
+    )
+
+    with respx.mock:
+        with SimulationClient() as client:
+            with pytest.raises(SimulationError, match="exceeds parser limits"):
+                client.upload_splat(splat)
+
+    assert len(respx.calls) == 0
+
+
 def test_upload_splat_rejects_excess_vertex_properties_before_presign(
     tmp_path: Path,
 ) -> None:

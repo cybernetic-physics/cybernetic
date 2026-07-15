@@ -136,7 +136,14 @@ def validate_hosted_splat_ply(path: Path) -> HostedSplatPly:
                     raise AssetPackageError(
                         "splat PLY Gaussian count must be an ASCII decimal integer"
                     )
-                gaussian_count = int(count_token)
+                if len(count_token) > len(str(HOSTED_SPLAT_MAX_GAUSSIANS)):
+                    raise AssetPackageError("splat PLY Gaussian count exceeds parser limits")
+                try:
+                    gaussian_count = int(count_token)
+                except ValueError as exc:
+                    raise AssetPackageError(
+                        "splat PLY Gaussian count exceeds parser limits"
+                    ) from exc
         elif parts[0] == "property" and in_vertices:
             if (
                 len(parts) != 3
