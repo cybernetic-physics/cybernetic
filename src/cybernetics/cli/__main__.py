@@ -24,6 +24,7 @@ from .lazy_group import LazyGroup
         "checkpoint": "cybernetics.cli.commands.checkpoint:cli",
         "doctor": "cybernetics.cli.commands.doctor:cli",
         "run": "cybernetics.cli.commands.run:cli",
+        "replay": "cybernetics.cli.commands.replay:cli",
         "sim": "cybernetics.cli.commands.sim:cli",
         "splat": "cybernetics.cli.commands.splat:cli",
         "version": "cybernetics.cli.commands.version:cli",

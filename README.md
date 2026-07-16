@@ -72,6 +72,103 @@ cybernetics --format json doctor
 DreamZero RL loss family (`flow_rwr` by default). This keeps SFT-only
 deployments usable while making RL readiness explicit in CI and runbooks.
 
+## Session replay for agents
+
+`cybernetics.replay` reads the durable session timeline and produces bounded,
+provider-neutral observations for text-and-image agents. Exact nanosecond values
+remain Python integers in memory and decimal strings in JSON. The default query
+is the latest 30 seconds, capped at 100 events and four visual frames. Timestamp
+values must fit the non-negative PostgreSQL `BIGINT` range. Dense observations
+retain the newest matching suffix and return it in chronological order; quality
+metadata identifies older evidence omitted by response, candidate, byte, or
+archive-scan limits. Fully implicit latest windows are anchored by the
+observation endpoint itself, avoiding a summary/read race with active sessions;
+custom latest durations use that server anchor and then request an exact window.
+
+```python
+import cybernetics
+from cybernetics.replay import ReplayQuery
+
+with cybernetics.Client() as client:
+    summary = client.replay.describe("sess_...")
+    print(summary.channels)
+
+    raw = client.replay.select_events(
+        "sess_...",
+        ReplayQuery(channels=("robot/*",), max_events=100),
+    )
+    print(raw.matched_events, len(raw.events), raw.truncation_reason)
+
+    observation = client.replay.get_observation(
+        "sess_...",
+        ReplayQuery(channels=("camera/*", "robot/*")),
+        image_data=True,
+    )
+
+    # Plain dictionaries for the two common multimodal message formats. Each
+    # frame is preceded by exact time, window offset, optional simulation time,
+    # source, channel, and event labels; untrusted replay context is last.
+    openai_content = observation.to_openai_content()
+    anthropic_content = observation.to_anthropic_content()
+
+    bundle = client.replay.export_agent_bundle("sess_...", "./replay-context")
+    print(bundle.manifest_path)
+```
+
+The provider-neutral `ReplayObservation` is the SDK contract; the adapter
+methods do not import either provider SDK. It validates the source
+`cybernetic.replay-observation/v1` envelope and serializes a distinct
+`cybernetic-replay-agent-observation/v1` shape, so wire and agent artifacts are
+never mislabeled. A replay window is explicitly untrusted delta evidence, never
+a claim that the full world state was reconstructed. Event `semantics` distinguish
+deltas, samples, events, and predictions; `media_ids` preserve authoritative
+event-to-frame linkage. Quality metadata remains additive and carries server
+truncation, scan, invalid-image, and missing unit/frame warnings.
+`page.available_exact` mirrors `quality.matchedEventsExact`; when false, the
+available count is only a lower bound and agent artifacts state that explicitly.
+
+The agent bundle is deterministic and safe to inspect or attach selectively:
+
+- `manifest.json` records the exact query, bounds, hashes, truncation, warnings,
+  omissions, and file inventory.
+- `context.md` explains the interpretation contract and links frames by media ID
+  to exact event time, window offset, simulation time, source, and channel.
+- `observations.ndjson` and `events.ndjson` contain text-safe structured data.
+- `frames/` contains magic-validated JPEG, PNG, WebP, or GIF bytes separately;
+  textual artifacts recursively omit embedded binary fields and every data URL
+  (including non-base64 SVG/text variants), and redact common
+  structured, quoted-JSON, Authorization/Cookie header, vendor environment, and
+  CLI-style credential values.
+
+The CLI exposes the same boundary:
+
+```bash
+cybernetics replay inspect sess_...
+cybernetics replay events sess_... --channel 'camera/*' --max-events 100
+cybernetics replay events sess_... --ndjson --start-time-ns 100 --end-time-ns 200
+cybernetics replay export sess_... --out ./replay-context --max-images 4
+cybernetics --format json replay inspect sess_...
+```
+
+Raw `iter_events()` reads are bounded across recordings by index-page, chunk,
+compressed-byte, decoded-byte, and parsed-event budgets. They validate immutable
+chunk size/SHA, vendor NDJSON MIME type, gzip encoding, event counts, channel
+envelopes, time envelopes, v1 recording identity, strict finite JSON, and nesting
+depth. Use `select_events()` when completeness matters: its
+`ReplayEventSelection` reports matched/returned counts and whether `max_events`
+omitted older (`max_events_before`) or newer (`max_events_after`) evidence. JSON
+CLI output includes the same page metadata, while `--ndjson` prints an explicit
+stderr warning if it truncates. Narrow the time/channel/recording selection when
+a session exceeds those guardrails. `recording_ids` and
+`include_control_events=False` are raw-only filters; observation/export rejects
+them instead of silently ignoring them. The default event serializer and every
+CLI mode omit embedded image base64; callers must explicitly use the in-memory
+event payload when they truly need raw bytes. Chunk pages use server-side time
+overlap filters. The control-event endpoint remains cursor-only, so very long
+sessions can hit its raw 64-page/10,000-event guardrail even for a narrow latest
+window; use the bounded observation API or `include_control_events=False` in
+that case.
+
 ## Simulation assets
 
 The SDK includes an MVP `sim` namespace for packaging local simulation assets as

@@ -30,6 +30,7 @@ from ._utils._logs import setup_logging as _setup_logging
 from ._version import __title__, __version__
 from .client import Client
 from .lib.public_interfaces import APIFuture, SamplingClient, ServiceClient, TrainingClient
+from .replay import ReplayClient, ReplayError, ReplayEventSelection, ReplayObservation, ReplayQuery
 
 # The generated SDK is async-first; keep the conventional top-level client name
 # available for callers that import it from the package root.
@@ -71,6 +72,11 @@ __all__ = [
     "AsyncCybernetics",
     "Cybernetics",
     "Client",
+    "ReplayClient",
+    "ReplayError",
+    "ReplayEventSelection",
+    "ReplayObservation",
+    "ReplayQuery",
     # Commonly used types
     "AdamParams",
     "Checkpoint",
