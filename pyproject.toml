@@ -1,6 +1,6 @@
 [project]
 name = "cybernetic-physics"
-version = "0.18.0"
+version = "0.19.0"
 description = "Cybernetics Python SDK for hosted rollout, sampling, and training control"
 readme = "README.md"
 license = "Apache-2.0"
