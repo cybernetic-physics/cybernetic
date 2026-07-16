@@ -8,7 +8,12 @@ import respx
 
 from cybernetics import Client
 from cybernetics.robotics import ROBOT_TASK_SCHEMA_VERSION, RobotTaskSpec
-from cybernetics.sim import SimulationAssetRef, SimulationClient, SimulationError
+from cybernetics.sim import (
+    SimulationAssetRef,
+    SimulationClient,
+    SimulationError,
+    SimulationLaunchError,
+)
 
 BASE = "https://api.test"
 
@@ -201,6 +206,104 @@ def test_launch_passes_explicit_runtime_provider() -> None:
     assert result.session_id == "sess_demo"
     request_body = json.loads(session_route.calls[0].request.content)
     assert request_body["runtimeProvider"] == "vast"
+
+
+@respx.mock
+def test_launch_wait_stops_created_session_when_readiness_fails() -> None:
+    respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": "queued"},
+        )
+    )
+    respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": "queued"},
+        )
+    )
+    stop_route = respx.post(f"{BASE}/v1/sessions/sess_demo/stop").mock(
+        return_value=httpx.Response(204)
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(SimulationLaunchError) as raised:
+            client.launch(
+                "cybernetics://envs/env_demo/versions/ver_demo",
+                wait=True,
+                timeout_seconds=0,
+                poll_interval_seconds=0,
+            )
+
+    assert raised.value.session_id == "sess_demo"
+    assert raised.value.stop_requested is True
+    assert "automatic stop requested" in str(raised.value)
+    assert isinstance(raised.value.__cause__, SimulationError)
+    assert stop_route.call_count == 1
+
+
+@respx.mock
+def test_launch_wait_retains_session_id_when_automatic_stop_fails() -> None:
+    respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": "queued"},
+        )
+    )
+    respx.get(f"{BASE}/v1/sessions/sess_demo").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": "queued"},
+        )
+    )
+    stop_route = respx.post(f"{BASE}/v1/sessions/sess_demo/stop").mock(
+        return_value=httpx.Response(500, json={"message": "stop failed"})
+    )
+
+    with SimulationClient() as client:
+        with pytest.raises(SimulationLaunchError) as raised:
+            client.launch(
+                "cybernetics://envs/env_demo/versions/ver_demo",
+                wait=True,
+                timeout_seconds=0,
+                poll_interval_seconds=0,
+            )
+
+    assert raised.value.session_id == "sess_demo"
+    assert raised.value.stop_requested is False
+    assert "stop the session manually" in str(raised.value)
+    assert any("HTTP 500" in note for note in raised.value.__notes__)
+    assert stop_route.call_count == 1
+
+
+@respx.mock
+def test_launch_wait_requests_stop_without_replacing_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"sessionId": "sess_demo", "status": "queued"},
+        )
+    )
+    stopped: list[str] = []
+
+    with SimulationClient() as client:
+        monkeypatch.setattr(
+            client,
+            "wait_for_session",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        monkeypatch.setattr(client, "stop_session", stopped.append)
+        with pytest.raises(KeyboardInterrupt) as raised:
+            client.launch(
+                "cybernetics://envs/env_demo/versions/ver_demo",
+                wait=True,
+            )
+
+    assert stopped == ["sess_demo"]
+    assert any("sess_demo" in note for note in raised.value.__notes__)
+    assert any("automatic stop requested" in note for note in raised.value.__notes__)
 
 
 @respx.mock

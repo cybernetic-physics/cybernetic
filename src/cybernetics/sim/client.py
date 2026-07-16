@@ -10,7 +10,7 @@ from urllib.parse import urlencode, urlparse
 
 from cybernetics.lib.credentials import resolve_api_key, resolve_base_url
 
-from .errors import SimulationError
+from .errors import SimulationError, SimulationLaunchError
 from .mcp import SessionMCPClient
 from .packaging import (
     AssetPackage,
@@ -454,11 +454,44 @@ class SimulationClient:
         session = self._request("POST", "/v1/sessions", json_body=body)
         session_id = _session_id(session)
         if wait:
-            session = self.wait_for_session(
-                session_id,
-                timeout_seconds=timeout_seconds,
-                poll_interval_seconds=poll_interval_seconds,
-            )
+            try:
+                session = self.wait_for_session(
+                    session_id,
+                    timeout_seconds=timeout_seconds,
+                    poll_interval_seconds=poll_interval_seconds,
+                )
+            except BaseException as wait_error:
+                stop_requested = False
+                cleanup_error: BaseException | None = None
+                try:
+                    self.stop_session(session_id)
+                    stop_requested = True
+                except BaseException as exc:
+                    cleanup_error = exc
+
+                if not isinstance(wait_error, Exception):
+                    cleanup = (
+                        "automatic stop requested" if stop_requested else "automatic stop failed"
+                    )
+                    wait_error.add_note(f"Created session {session_id}; {cleanup}.")
+                    if cleanup_error is not None:
+                        wait_error.add_note(
+                            "Automatic session cleanup raised "
+                            f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        )
+                    raise
+
+                launch_error = SimulationLaunchError(
+                    session_id,
+                    stop_requested=stop_requested,
+                    reason=str(wait_error),
+                )
+                if cleanup_error is not None:
+                    launch_error.add_note(
+                        "Automatic session cleanup raised "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                raise launch_error from wait_error
 
         return SimLaunchResult(
             session=session,

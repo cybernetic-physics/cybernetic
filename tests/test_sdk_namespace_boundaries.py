@@ -45,6 +45,7 @@ def test_sim_imports_without_robotics_namespace() -> None:
         from cybernetics import Client
 
         assert sim.SimulationClient
+        assert issubclass(sim.SimulationLaunchError, sim.SimulationError)
         assert Client.__name__ == "Client"
         assert "cybernetics.robotics" not in sys.modules
         """
