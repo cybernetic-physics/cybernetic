@@ -141,6 +141,15 @@ receives HTTP 409, the SDK reads the session and treats the call as successful
 only when the stop was already accepted (`stopping`) or the session is ended;
 unrelated conflicts still raise `SimulationError`.
 
+`launch(..., wait=True)` is transactional around readiness: after the control
+plane creates a session, the SDK owns it until the launch result is returned.
+If readiness fails or the caller interrupts the wait, the SDK requests a stop.
+Ordinary readiness failures raise `SimulationLaunchError`, a
+`SimulationError` subclass carrying `session_id` and `stop_requested`, so a
+failed automatic stop remains recoverable. Callers that intentionally want to
+retain a not-yet-ready session should use `launch(..., wait=False)` and then
+call `wait_for_session(result.session_id)` themselves.
+
 `cybernetics.sim` owns asset packaging, import, preview, render, catalog, and
 launch helpers. `cybernetics.robotics` owns `RobotTaskSpec`, backend adapters,
 run records, policy artifacts, replay artifacts, datasets, and evaluation
